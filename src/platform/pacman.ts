@@ -11,6 +11,7 @@ const PACMAN_PRESETS = [
   { id: 'siege.c', name: 'Siege Game' },
   { id: 'climber.c', name: 'Climber Game' },
   { id: 'chase.c', name: 'Chase' },
+  { id: 'pacman.c', name: 'Pac-Man' },
 ];
 
 class PacmanPlatform extends BaseZ80MachinePlatform<PacmanMachine> implements Platform {
