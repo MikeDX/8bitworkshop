@@ -52,6 +52,7 @@ byte fright_on;
 byte fright_tick;
 byte eat_combo;
 byte elroy;
+byte elroy_suspended;
 byte freeze_ghost;
 byte freeze_score;
 byte pac_dir, pac_want;
@@ -92,8 +93,7 @@ static void poke_tile_only(byte x, byte y, byte tile) {
   *((byte*)(0x4000 + vram_addr(x, y))) = tile;
 }
 
-/* Right-aligned score ending at (x,y); at least "00". Tile updates only.
- * Scores never shrink — no leading blanking (row cleared once on HUD force). */
+/* Right-aligned score ending at (x,y); at least "00". Tile updates only. */
 static void draw_score_r(byte x, byte y, word n) {
   byte d0, d1, d2, d3, d4;
   word v = n;
@@ -106,7 +106,7 @@ static void draw_score_r(byte x, byte y, word n) {
   d4 = (byte)v;
 
   pos = x;
-  poke_tile_only(pos, y, (byte)('0')); /* trailing 0 (arcade points×10 look) */
+  poke_tile_only(pos, y, (byte)('0'));
   pos--;
   poke_tile_only(pos, y, (byte)('0' + d4));
   if (n >= 10) { pos--; poke_tile_only(pos, y, (byte)('0' + d3)); }
@@ -389,7 +389,7 @@ static void attract_chase(void) {
   hud_ready = 0;
   draw_hud();
 
-  actors_reset_level();
+  actors_reset_level(0);
   /* Pac spawns at chase_t==0; ghosts follow on ATTRACT_GHOST_GAP beats — all at 240. */
   pac_x = ATTRACT_SPAWN_X;
   pac_y = ATTRACT_ROW_CY;
@@ -402,7 +402,6 @@ static void attract_chase(void) {
     ghosts[i].dir = DIR_LEFT;
     ghosts[i].next_dir = DIR_LEFT;
     ghosts[i].mode = MODE_CHASE;
-    ghosts[i].in_house = 0;
     ghosts[i].frac = 0;
     ghosts[i].speed_sig = 0xff;
     ghosts[i].color = ghost_pal[i];
@@ -431,21 +430,16 @@ static void attract_chase(void) {
 
     /* Ghosts spawn one-by-one at ATTRACT_SPAWN_X; only timing differs. */
     for (i = 0; i < GHOST_N; i++) {
-      word t_spawn = (word)((word)(i + 1) * ATTRACT_GHOST_GAP);
+      word t_spawn = (word)((word)(i + 1) << 4); /* ATTRACT_GHOST_GAP==16 */
       if (!(spawned & (1 << i)) && chase_t == t_spawn) {
-        ghosts[i].x = ATTRACT_SPAWN_X;
-        ghosts[i].y = ATTRACT_ROW_CY;
-        ghosts[i].frac = 0;
-        ghosts[i].speed_sig = 0xff;
-        if (hunt || power_ticks) {
-          ghosts[i].dir = DIR_RIGHT;
-          ghosts[i].next_dir = DIR_RIGHT;
-          ghosts[i].mode = MODE_FRIGHT;
-        } else {
-          ghosts[i].dir = DIR_LEFT;
-          ghosts[i].next_dir = DIR_LEFT;
-          ghosts[i].mode = MODE_CHASE;
-        }
+        Ghost* g = &ghosts[i];
+        g->x = ATTRACT_SPAWN_X;
+        g->y = ATTRACT_ROW_CY;
+        g->frac = 0;
+        g->speed_sig = 0xff;
+        g->dir = g->next_dir = (hunt || power_ticks) ? DIR_RIGHT : DIR_LEFT;
+        g->mode = (hunt || power_ticks) ? MODE_FRIGHT : MODE_CHASE;
+        if (hunt || power_ticks) g->frightened = 1;
         spawned = (byte)(spawned | (1 << i));
       }
     }
@@ -455,7 +449,7 @@ static void attract_chase(void) {
       actors_draw();
       attract_blank_offscreen(spawned);
       freeze_ticks--;
-      if (power_ticks) power_ticks--;
+      /* fright timer paused during score popup (same as gameplay) */
       /* Last ghost score popup just finished → end title chase. */
       eaten = 0;
       for (i = 0; i < GHOST_N; i++) {
@@ -472,20 +466,22 @@ static void attract_chase(void) {
 
     /* Keep fright/chase mode in sync for speed + draw. */
     for (i = 0; i < GHOST_N; i++) {
+      Ghost* g;
+      byte d;
       if (!(spawned & (1 << i))) continue;
-      if (ghosts[i].mode == MODE_EYES) {
-        ghosts[i].dir = DIR_RIGHT;
+      g = &ghosts[i];
+      if (g->mode == MODE_EYES) {
+        g->dir = DIR_RIGHT;
         continue;
       }
+      d = hunt ? DIR_RIGHT : DIR_LEFT;
+      g->dir = d;
       if (power_ticks) {
-        ghosts[i].mode = MODE_FRIGHT;
-        ghosts[i].dir = hunt ? DIR_RIGHT : DIR_LEFT;
-      } else if (hunt) {
-        ghosts[i].mode = MODE_SCATTER;
-        ghosts[i].dir = DIR_RIGHT;
+        g->mode = MODE_FRIGHT;
+        g->frightened = 1;
       } else {
-        ghosts[i].mode = MODE_CHASE;
-        ghosts[i].dir = DIR_LEFT;
+        g->frightened = 0;
+        g->mode = hunt ? MODE_SCATTER : MODE_CHASE;
       }
     }
 
@@ -494,15 +490,16 @@ static void attract_chase(void) {
     /* Energizer just eaten → reverse Pac + ghosts (arcade fright reverse). */
     if (power_ticks && !was_power) {
       hunt = 1;
-      pac_dir = DIR_RIGHT;
-      pac_want = DIR_RIGHT;
+      pac_dir = pac_want = DIR_RIGHT;
       for (i = 0; i < GHOST_N; i++) {
+        Ghost* g;
         if (!(spawned & (1 << i))) continue;
-        if (ghosts[i].mode == MODE_EYES) continue;
-        ghosts[i].dir = DIR_RIGHT;
-        ghosts[i].next_dir = DIR_RIGHT;
-        ghosts[i].mode = MODE_FRIGHT;
-        ghosts[i].speed_sig = 0xff;
+        g = &ghosts[i];
+        if (g->mode == MODE_EYES) continue;
+        g->dir = g->next_dir = DIR_RIGHT;
+        g->mode = MODE_FRIGHT;
+        g->frightened = 1;
+        g->speed_sig = 0xff;
       }
     }
     was_power = power_ticks ? 1 : 0;
@@ -663,7 +660,7 @@ void show_death(void) {
 void show_game_over(void) {
   byte t;
   /* Pixel (160,144) → tile (9,20); arcade uses pal 1. */
-  put_string(9, 20, "GAME OVER", 1);
+  put_string(9, 20, "GAME  OVER", 1);
   for (t = 0; t < 180; t++) {
     wait_vblank();
     watchdog = 0;
@@ -674,11 +671,10 @@ void start_round(byte player_one) {
   hide_all_sprites();
   draw_maze();
   count_dots();
-  actors_reset_level();
+  actors_reset_level(0);
   hud_ready = 0;
   draw_hud();
-  sfx_off();
-  update_ambient();
+  sfx_off(); /* silent through READY; ambient starts when play resumes */
   show_ready_banner(player_one);
 }
 
@@ -713,8 +709,7 @@ void game_loop(void) {
 
     if (freeze_ticks) {
       freeze_ticks--;
-      /* timers still advance during eat-freeze (arcade-like) */
-      if (power_ticks) power_ticks--;
+      /* [CONFIRM] fright timer paused while score popup freezes the game */
       update_ambient();
       draw_hud();
       flash_1up();
@@ -733,12 +728,13 @@ void game_loop(void) {
         game_over = 1;
         break;
       }
-      /* After a death, use global dot counter for house release (floooh) */
+      /* [CONFIRM] death → global 7/17/32; keep personal; Elroy off until Clyde */
       global_dot_mode = 1;
       global_dot_counter = 0;
-      actors_reset_level();
+      elroy_suspended = 1;
+      actors_reset_level(1);
       draw_hud();
-      update_ambient();
+      sfx_off(); /* no chase noise through READY */
       show_ready_banner(0);
     }
 

@@ -3,7 +3,7 @@
 
 #include "pacman_game.h"
 
-void actors_reset_level(void);
+void actors_reset_level(byte after_death); /* 1 = keep personal dot counters */
 void pac_update(void);
 void ghosts_update(void);
 void actors_draw(void);
@@ -23,6 +23,7 @@ byte update_ghost_dir(byte i);
 void update_ghost_state(byte i);
 void set_house_limits(void);
 void ghost_frame_begin(void); /* cache scatter/chase for this frame */
+void update_elroy(void);
 
 
 #endif

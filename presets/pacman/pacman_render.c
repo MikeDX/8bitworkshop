@@ -5,8 +5,6 @@
 #include "pacman_assets.h"
 
 extern const byte ghost_pal[GHOST_N];
-extern const byte scat_x[GHOST_N];
-extern const byte scat_y[GHOST_N];
 
 /* Last tile where we already tried to eat — peek only on tile entry. */
 static byte pac_eat_tx;
@@ -27,7 +25,13 @@ byte rand8(void) {
 
 
 #pragma opt_code_size
-void actors_reset_level(void) {
+/*
+ * Reset Pac + ghosts for a new maze or after death.
+ * after_death=1: [CONFIRM] keep personal dot counters; caller sets global_dot_mode
+ *                and elroy_suspended (Elroy stays off until Clyde leaves).
+ * after_death=0: [CONFIRM] clear personal counters; Elroy may activate normally.
+ */
+void actors_reset_level(byte after_death) {
   byte i;
 
   pac_x = 14 * 8;
@@ -41,22 +45,23 @@ void actors_reset_level(void) {
   pac_anim = 0;
   power_ticks = 0;
   eat_combo = 0;
-  round_ticks = 0;
+  round_ticks = 0; /* [CONFIRM] S/C schedule restarts each life/round */
   elroy = 0;
+  if (!after_death) elroy_suspended = 0;
   fruit_ticks = 0;
   fruit_visible = 0;
   fruit_shown = 0;
   pac_stop = 0;
-  force_house = 0;
+  force_house = 0; /* [CONFIRM] house force-exit timer resets */
   freeze_ticks = 0;
   eyes_present = 0;
+  rnd = 0xCACE; /* [CONFIRM] PRNG reseeds each life/round (frightened paths) */
 
   for (i = 0; i < GHOST_N; i++) {
     Ghost* g = &ghosts[i];
     g->color = ghost_pal[i];
-    g->scat_x = scat_x[i];
-    g->scat_y = scat_y[i];
-    g->dot_counter = 0;
+    /* scat corners live in scat_x[]/scat_y[] — not cached on Ghost */
+    if (!after_death) g->dot_counter = 0;
     g->frac = 0;
     g->speed_sig = 0xff;
     g->x = 14 * 8;
@@ -64,7 +69,7 @@ void actors_reset_level(void) {
     g->dir = DIR_UP;
     g->next_dir = DIR_UP;
     g->mode = MODE_HOUSE;
-    g->in_house = 1;
+    g->frightened = 0;
   }
   set_house_limits();
 
@@ -73,7 +78,7 @@ void actors_reset_level(void) {
   ghosts[0].dir = DIR_LEFT;
   ghosts[0].next_dir = DIR_LEFT;
   ghosts[0].mode = MODE_SCATTER;
-  ghosts[0].in_house = 0;
+  ghosts[0].frightened = 0;
 
 #if defined(ENABLE_ZOMBIE)
   /* 3 above house over Inky/Pinky/Clyde columns. */
@@ -83,13 +88,11 @@ void actors_reset_level(void) {
   ghosts[4].dir = DIR_LEFT;
   ghosts[4].next_dir = DIR_LEFT;
   ghosts[4].mode = MODE_SCATTER;
-  ghosts[4].in_house = 0;
   ghosts[5].x = 16 * 8;
   ghosts[5].y = 14 * 8 + 4;
   ghosts[5].dir = DIR_LEFT;
   ghosts[5].next_dir = DIR_LEFT;
   ghosts[5].mode = MODE_SCATTER;
-  ghosts[5].in_house = 0;
 #elif defined(ENABLE_CURLY)
   /* Curly alone: Blinky left, Curly in classic Blinky slot. */
   ghosts[0].x = 12 * 8;
@@ -98,7 +101,6 @@ void actors_reset_level(void) {
   ghosts[4].dir = DIR_LEFT;
   ghosts[4].next_dir = DIR_LEFT;
   ghosts[4].mode = MODE_SCATTER;
-  ghosts[4].in_house = 0;
 #endif
 
   /* Pinky middle */
@@ -125,19 +127,18 @@ byte check_ghost_hits(void) {
       continue;
     if ((byte)(g->y >> 3) != pty)
       continue;
-    if (mode == MODE_FRIGHT) {
+    if (mode == MODE_FRIGHT || g->frightened) {
+      static const byte eat_pts[4] = { 20, 40, 80, 160 };
       byte combo = eat_combo;
       if (combo > 3) combo = 3;
       play_sfx(3);
-      if (combo == 0) score += 20;
-      else if (combo == 1) score += 40;
-      else if (combo == 2) score += 80;
-      else score += 160;
+      score += eat_pts[combo];
       freeze_score = combo;
       freeze_ghost = i;
       freeze_ticks = EAT_FREEZE_TICKS;
       eat_combo = (byte)(combo + 1);
       g->mode = MODE_EYES;
+      g->frightened = 0; /* eaten — no longer vulnerable */
       eyes_present = 1;
       return 0;
     }
@@ -147,7 +148,13 @@ byte check_ghost_hits(void) {
   if (fruit_visible &&
       (byte)((pac_x + 4) >> 3) == FRUIT_TX &&
       (byte)(pac_y >> 3) == FRUIT_TY) {
-    score += 10;
+    /* A.1 bonus /100 (key=50); score is tens → ×10. 500 tens won't fit in a byte. */
+    static const byte fruit_pts[13] = {
+      1, 3, 5, 5, 7, 7, 10, 10, 20, 20, 30, 30, 50
+    };
+    byte lv = level;
+    if (lv > 12) lv = 12;
+    score += (word)fruit_pts[lv] * 10;
     fruit_visible = 0;
     fruit_ticks = 90;
   }
@@ -182,10 +189,14 @@ static const byte score_spr[4] = {
 void actors_draw_anim(byte animate) {
   byte i, sh, pal, anim, dir;
   byte eyes_pal;
+  word flash_at;
   Ghost* g;
 
+  /* Freeze sprite frames during score popup (Pac hidden, ghosts still). */
+  if (freeze_ticks) animate = 0;
   anim = animate ? (byte)((anim_ticks >> 2) & 1) : 0;
   eyes_pal = attract_demo ? 0 : PAL_EYES;
+  flash_at = fright_flash_ticks();
 
   if (freeze_ticks) {
     hide_sprite(0);
@@ -212,9 +223,10 @@ void actors_draw_anim(byte animate) {
     } else if (g->mode == MODE_EYES || g->mode == MODE_ENTER) {
       sh = (byte)(ghost_dir_base[dir] + anim);
       pal = eyes_pal;
-    } else if (g->mode == MODE_FRIGHT) {
+    } else if (g->frightened) {
       sh = (byte)(SP_SCARED0 + anim);
-      pal = (power_ticks < 60 && (anim_ticks & 0x10))
+      /* No frame anim or white/blue flash during ghost-eat score freeze */
+      pal = (!freeze_ticks && power_ticks <= flash_at && (anim_ticks & 0x10))
             ? PAL_SCARED_BLINK : PAL_SCARED;
     } else {
       sh = (byte)(ghost_dir_base[dir] + anim);
@@ -324,10 +336,27 @@ void pac_update(void) {
 void ghosts_update(void) {
   byte i, steps, s;
   Ghost* g;
+  word force_limit;
 
   if (!power_ticks)
-    round_ticks++;
+    round_ticks++; /* [CONFIRM] S/C timer paused during fright */
   force_house++;
+
+  /* [CHANGE] 4s L1–4, 3s L5+; release only most-preferred ghost in house */
+  force_limit = (level < 4) ? (word)(4 * 60) : (word)(3 * 60);
+  if (force_house >= force_limit) {
+    force_house = 0;
+    for (i = 1; i <= 3; i++) {
+      if (ghosts[i].mode == MODE_HOUSE) {
+        ghosts[i].mode = MODE_LEAVE;
+        if (i == 3 && elroy_suspended) {
+          elroy_suspended = 0;
+          update_elroy();
+        }
+        break;
+      }
+    }
+  }
 
   ghost_frame_begin(); /* phase_mode once for all ghosts */
   eyes_present = 0;
@@ -349,7 +378,6 @@ void ghosts_update(void) {
           break;
         move_pos(&g->x, &g->y, g->dir, 0);
       } else {
-        /* Corridor between decision points — path already chosen. */
         move_pos(&g->x, &g->y, g->dir, 0);
       }
     }

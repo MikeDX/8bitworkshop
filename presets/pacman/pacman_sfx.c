@@ -5,10 +5,7 @@
 static void pac_sound_vblank(void);
 
 byte any_eyes(void) {
-  byte i;
-  for (i = 0; i < GHOST_N; i++)
-    if (ghosts[i].mode == MODE_EYES || ghosts[i].mode == MODE_ENTER) return 1;
-  return 0;
+  return eyes_present;
 }
 
 void sfx_off(void) {

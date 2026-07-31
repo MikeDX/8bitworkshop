@@ -75,16 +75,15 @@
 #define MODE_ENTER    6
 
 /*
- * Optional extra ghosts — comment out either define to disable.
- *   ENABLE_CURLY  → GHOST_N=5  (Curly / "Idiot", pal 22)
- *   ENABLE_ZOMBIE → GHOST_N=6  (Fred / "Zombie", pal 23; implies Curly)
- * Fruit sprite shifts up so extras can use HW sprites 5+.
+ * Base game is exactly 4 ghosts (Blinky/Pinky/Inky/Clyde).
+ * Optional extras (off by default) — leave undefined for dossier accuracy:
+ *   ENABLE_CURLY  → +Curly; ENABLE_ZOMBIE → +Fred (implies Curly)
  */
-#define ENABLE_CURLY
-#define ENABLE_ZOMBIE
+/* #define ENABLE_CURLY */
+/* #define ENABLE_ZOMBIE */
 
 #if defined(ENABLE_ZOMBIE) && !defined(ENABLE_CURLY)
-#define ENABLE_CURLY   /* Zombie pack includes Curly */
+#define ENABLE_CURLY
 #endif
 
 #if defined(ENABLE_ZOMBIE)
@@ -118,12 +117,11 @@ typedef struct {
   byte next_dir;
   byte mode;
   byte color;
-  byte scat_x, scat_y;
   byte dot_counter;
   byte dot_limit;
-  byte in_house;
+  byte frightened; /* blue; set on pill, clear on power end/respawn */
   byte speed_sig;  /* cache key: mode + tunnel + elroy */
-} Ghost;
+} Ghost; /* keep sizeof 16 for cheap i<<4 indexing */
 
 extern word rnd;
 extern word score;
@@ -150,6 +148,7 @@ extern byte fright_on;
 extern byte fright_tick;
 extern byte eat_combo;
 extern byte elroy;
+extern byte elroy_suspended; /* dossier: after death, Elroy off until Clyde leaves */
 extern byte freeze_ghost;    /* which ghost shows the score pop */
 extern byte freeze_score;    /* 0..3 → 200/400/800/1600 */
 extern byte pac_dir, pac_want;

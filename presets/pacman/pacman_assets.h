@@ -19,7 +19,6 @@ void pac_sound_engine(void);
 void pac_sound_effects(void);
 
 extern const byte pac_sound_tables[];
-extern const byte maze_tiles[868];
 extern const byte color_prom[32];
 extern const byte palette_prom[256];
 extern const byte wave_rom[256];
