@@ -14,6 +14,11 @@
 //#link "pacman_actors.c"
 //#link "pacman_render.c"
 
+/* Keep _CODE under 0x4000 (tile_rom) — IDE SDCC disables opts without this.
+ * Size over speed: title/attract/HUD dominate this file; gameplay hot paths
+ * live in pacman_actors.c / pacman_render.c. */
+#pragma opt_code_size
+
 #include "pacman_common.h"
 #include "pacman_assets.h"
 #include "pacman_game.h"
@@ -55,8 +60,12 @@ byte tick;
 byte pac_stop;
 byte global_dot_mode;
 byte global_dot_counter;
+byte attract_demo;
+byte eyes_present;
 
 Ghost ghosts[GHOST_N];
+
+extern const byte ghost_pal[GHOST_N];
 
 static word hud_score;
 static word hud_hiscore;
@@ -197,7 +206,7 @@ static void show_ready_banner(byte player_one) {
 }
 
 /*
- * Attract / intro (floooh intro_tick timing). Chase demo omitted for now.
+ * Attract / intro (floooh intro_tick timing) + chase demo.
  * Coin adds a credit (cap 99), plays ding, and aborts the slow intro so
  * START can begin a game once credits > 0.
  */
@@ -236,9 +245,11 @@ static void draw_credits(void) {
     poke_tile(10, 35, T_BLANK, 0x0F);
     poke_tile(11, 35, (byte)('0' + n), 0x0F);
   } else {
+    byte tens = 0;
+    while (n >= 10) { n = (byte)(n - 10); tens++; }
     poke_tile(9, 35, T_BLANK, 0x0F);
-    poke_tile(10, 35, (byte)('0' + n / 10), 0x0F);
-    poke_tile(11, 35, (byte)('0' + n % 10), 0x0F);
+    poke_tile(10, 35, (byte)('0' + tens), 0x0F);
+    poke_tile(11, 35, (byte)('0' + n), 0x0F);
   }
 }
 
@@ -273,22 +284,274 @@ static void attract_draw_copyright(void) {
 }
 
 /* Fixed-width rows in CODE — `[][]` / pointer tables are invalid or hit _INITIALIZED. */
+#if defined(ENABLE_ZOMBIE)
+static const char ghost_names[6][9] = {
+  "-SHADOW", "-SPEEDY", "-BASHFUL", "-POKEY", "-IDIOT", "-ZOMBIE"
+};
+static const char ghost_nicks[6][9] = {
+  "\"BLINKY\"", "\"PINKY\"", "\"INKY\"", "\"CLYDE\"", "\"CURLY\"", "\"FRED\""
+};
+#elif defined(ENABLE_CURLY)
+static const char ghost_names[5][9] = {
+  "-SHADOW", "-SPEEDY", "-BASHFUL", "-POKEY", "-IDIOT"
+};
+static const char ghost_nicks[5][9] = {
+  "\"BLINKY\"", "\"PINKY\"", "\"INKY\"", "\"CLYDE\"", "\"CURLY\""
+};
+#else
 static const char ghost_names[4][9] = {
   "-SHADOW", "-SPEEDY", "-BASHFUL", "-POKEY"
 };
 static const char ghost_nicks[4][9] = {
   "\"BLINKY\"", "\"PINKY\"", "\"INKY\"", "\"CLYDE\""
 };
+#endif
+
+/* Intro text ends; short hold, then chase. Pills flash only in chase. */
+#if defined(ENABLE_ZOMBIE)
+#define ATTRACT_PTS_T      810
+#define ATTRACT_COPY_T     900
+#define ATTRACT_CHASE_T0   960
+#elif defined(ENABLE_CURLY)
+#define ATTRACT_PTS_T      690
+#define ATTRACT_COPY_T     780
+#define ATTRACT_CHASE_T0   840
+#else
+#define ATTRACT_PTS_T      570
+#define ATTRACT_COPY_T     660
+#define ATTRACT_CHASE_T0   720
+#endif
+#define ATTRACT_ROW_CY     (20 * 8 + 4)
+/* Pixel centers ≥224 are past the right edge (sprite hardware wraps). */
+#define ATTRACT_SPAWN_X    240
+#define ATTRACT_GHOST_GAP  16  /* frames between Pac / ghost spawns */
+#define ATTRACT_PAL_BLACK  0   /* unused all-black sprite palette */
+
+static void attract_blank_offscreen(byte spawned) {
+  byte i;
+  /* Pac / ghosts past the seam: black pal (no wrap flash). */
+  if (pac_x < 8 || pac_x >= 224)
+    ((byte*)0x4ff0)[1] = ATTRACT_PAL_BLACK;
+  for (i = 0; i < GHOST_N; i++) {
+    Ghost* g = &ghosts[i];
+    if (!(spawned & (1 << i))) {
+      hide_sprite((byte)(i + 1));
+      continue;
+    }
+    g->y = ATTRACT_ROW_CY;
+    if (g->x < 8 || g->x >= 224)
+      ((byte*)0x4ff0)[(i + 1) * 2 + 1] = ATTRACT_PAL_BLACK;
+  }
+  hide_sprite(SPR_FRUIT); /* no fruit on attract */
+}
+
+/* Horizontal-only step — no tunnel wrap. Enter from x≥224; park after exit. */
+static void attract_move_ghosts(byte spawned) {
+  byte i, s, steps;
+  Ghost* g;
+
+  for (i = 0; i < GHOST_N; i++) {
+    if (!(spawned & (1 << i))) continue;
+    g = &ghosts[i];
+    /* Parked after leaving the visible area. */
+    if (g->dir == DIR_RIGHT && g->x >= 224) continue;
+    if (g->dir == DIR_LEFT && g->x < 8) continue;
+    steps = take_steps(&g->frac, ghost_speed_cached(g));
+    for (s = 0; s < steps; s++) {
+      if (g->dir == DIR_LEFT) {
+        if (g->x > 0) g->x--;
+      } else if (g->dir == DIR_RIGHT) {
+        if (g->x < 255) g->x++;
+      }
+    }
+    g->y = ATTRACT_ROW_CY;
+  }
+}
+
+/*
+ * Pac enters from the right → energizer → turn → eat ghosts.
+ * Ends when the last eaten-ghost score popup finishes (maze attract next).
+ */
+static void attract_chase(void) {
+  byte i;
+  byte spawned = 0;
+  byte eaten = 0;
+  byte hunt = 0;
+  byte was_power = 0;
+  byte pill_pal = 0xFF;
+  word chase_t = 0;
+
+  attract_demo = 1;
+  level = 0;
+  dots_left = 244;
+  dots_eaten = 0;
+  score = 0;
+  hud_ready = 0;
+  draw_hud();
+
+  actors_reset_level();
+  /* Pac spawns at chase_t==0; ghosts follow on ATTRACT_GHOST_GAP beats — all at 240. */
+  pac_x = ATTRACT_SPAWN_X;
+  pac_y = ATTRACT_ROW_CY;
+  pac_dir = DIR_LEFT;
+  pac_want = DIR_LEFT;
+
+  for (i = 0; i < GHOST_N; i++) {
+    ghosts[i].x = 0;
+    ghosts[i].y = 0;
+    ghosts[i].dir = DIR_LEFT;
+    ghosts[i].next_dir = DIR_LEFT;
+    ghosts[i].mode = MODE_CHASE;
+    ghosts[i].in_house = 0;
+    ghosts[i].frac = 0;
+    ghosts[i].speed_sig = 0xff;
+    ghosts[i].color = ghost_pal[i];
+  }
+
+  /* Solid pills until chase starts flashing below. */
+  poke_pal(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, 0x10);
+  poke_pal(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, 0x10);
+
+  while (!(START1 && credits)) {
+    wait_vblank();
+    watchdog = 0;
+    anim_ticks++;
+    poll_credit();
+
+    /* Flash pills only while the chase demo is running. */
+    {
+      byte pp = (byte)((anim_ticks & 0x8) ? 0x10 : 0);
+      if (pp != pill_pal) {
+        pill_pal = pp;
+        poke_pal(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, pp);
+        if (peek_tile(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY) == T_POWER_A)
+          poke_pal(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, pp);
+      }
+    }
+
+    /* Ghosts spawn one-by-one at ATTRACT_SPAWN_X; only timing differs. */
+    for (i = 0; i < GHOST_N; i++) {
+      word t_spawn = (word)((word)(i + 1) * ATTRACT_GHOST_GAP);
+      if (!(spawned & (1 << i)) && chase_t == t_spawn) {
+        ghosts[i].x = ATTRACT_SPAWN_X;
+        ghosts[i].y = ATTRACT_ROW_CY;
+        ghosts[i].frac = 0;
+        ghosts[i].speed_sig = 0xff;
+        if (hunt || power_ticks) {
+          ghosts[i].dir = DIR_RIGHT;
+          ghosts[i].next_dir = DIR_RIGHT;
+          ghosts[i].mode = MODE_FRIGHT;
+        } else {
+          ghosts[i].dir = DIR_LEFT;
+          ghosts[i].next_dir = DIR_LEFT;
+          ghosts[i].mode = MODE_CHASE;
+        }
+        spawned = (byte)(spawned | (1 << i));
+      }
+    }
+
+    if (freeze_ticks) {
+      update_ambient();
+      actors_draw();
+      attract_blank_offscreen(spawned);
+      freeze_ticks--;
+      if (power_ticks) power_ticks--;
+      /* Last ghost score popup just finished → end title chase. */
+      eaten = 0;
+      for (i = 0; i < GHOST_N; i++) {
+        if ((spawned & (1 << i)) && ghosts[i].mode == MODE_EYES)
+          eaten++;
+      }
+      if (eaten == GHOST_N && !freeze_ticks)
+        break;
+      if (chase_t != 0xFFFF) chase_t++;
+      continue;
+    }
+
+    pac_want = hunt ? DIR_RIGHT : DIR_LEFT;
+
+    /* Keep fright/chase mode in sync for speed + draw. */
+    for (i = 0; i < GHOST_N; i++) {
+      if (!(spawned & (1 << i))) continue;
+      if (ghosts[i].mode == MODE_EYES) {
+        ghosts[i].dir = DIR_RIGHT;
+        continue;
+      }
+      if (power_ticks) {
+        ghosts[i].mode = MODE_FRIGHT;
+        ghosts[i].dir = hunt ? DIR_RIGHT : DIR_LEFT;
+      } else if (hunt) {
+        ghosts[i].mode = MODE_SCATTER;
+        ghosts[i].dir = DIR_RIGHT;
+      } else {
+        ghosts[i].mode = MODE_CHASE;
+        ghosts[i].dir = DIR_LEFT;
+      }
+    }
+
+    pac_update();
+
+    /* Energizer just eaten → reverse Pac + ghosts (arcade fright reverse). */
+    if (power_ticks && !was_power) {
+      hunt = 1;
+      pac_dir = DIR_RIGHT;
+      pac_want = DIR_RIGHT;
+      for (i = 0; i < GHOST_N; i++) {
+        if (!(spawned & (1 << i))) continue;
+        if (ghosts[i].mode == MODE_EYES) continue;
+        ghosts[i].dir = DIR_RIGHT;
+        ghosts[i].next_dir = DIR_RIGHT;
+        ghosts[i].mode = MODE_FRIGHT;
+        ghosts[i].speed_sig = 0xff;
+      }
+    }
+    was_power = power_ticks ? 1 : 0;
+
+    attract_move_ghosts(spawned);
+
+    if (check_ghost_hits()) {
+      /* Contact before pill — abort demo (spacing should prevent this). */
+      break;
+    }
+
+    if (power_ticks) power_ticks--;
+    update_ambient();
+    actors_draw();
+    attract_blank_offscreen(spawned);
+
+    if (chase_t > 1200) break;
+    if (chase_t != 0xFFFF) chase_t++;
+  }
+
+  attract_demo = 0;
+  hide_all_sprites();
+  sfx_off();
+  power_ticks = 0;
+  freeze_ticks = 0;
+}
+
+static void attract_draw_pts_legend(void) {
+  poke_tile(10, 24, T_DOT_A, PAL_DOT);
+  put_string(12, 24, "10 ", 0x0F);
+  poke_tile(15, 24, TILE_PTS0, 0x0F);
+  poke_tile(16, 24, TILE_PTS1, 0x0F);
+  poke_tile(17, 24, TILE_PTS2, 0x0F);
+  poke_tile(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, T_POWER_A, PAL_DOT);
+  put_string(12, 26, "50 ", 0x0F);
+  poke_tile(15, 26, TILE_PTS0, 0x0F);
+  poke_tile(16, 26, TILE_PTS1, 0x0F);
+  poke_tile(17, 26, TILE_PTS2, 0x0F);
+}
 
 void title_screen(void) {
   word t;
   byte i, y, pal;
-  byte prompt_on = 0xFF;
-  byte attract_pill_pal = 0xFF;
+  byte chase_done = 0;
 
   clrscr(0);
   hide_all_sprites();
   sfx_off();
+  attract_demo = 0;
   coin_was_down = COIN1 ? 1 : 0;
 
   /* Player score shows 00 on attract; keep hiscore. */
@@ -299,97 +562,61 @@ void title_screen(void) {
   draw_credits();
 
   t = 0;
-  /* START with credits, or coin aborts intro early then wait for START. */
+  /* Intro + chase; START with credits leaves. */
   while (!(START1 && credits)) {
     wait_vblank();
     watchdog = 0;
     anim_ticks++;
 
     if (poll_credit()) {
-      /* Skip remaining timed reveals — stay in wait-for-START. */
-      if (t < 660) {
-        if (t < 570) {
-          /* pts legend not shown yet — draw it so abort looks complete */
-          poke_tile(10, 24, T_DOT_A, PAL_DOT);
-          put_string(12, 24, "10 ", 0x0F);
-          poke_tile(15, 24, TILE_PTS0, 0x0F);
-          poke_tile(16, 24, TILE_PTS1, 0x0F);
-          poke_tile(17, 24, TILE_PTS2, 0x0F);
-          poke_tile(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, T_POWER_A, PAL_DOT);
-          put_string(12, 26, "50 ", 0x0F);
-          poke_tile(15, 26, TILE_PTS0, 0x0F);
-          poke_tile(16, 26, TILE_PTS1, 0x0F);
-          poke_tile(17, 26, TILE_PTS2, 0x0F);
-        }
-        if (t < 660) {
-          attract_draw_copyright();
-          poke_tile(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, T_POWER_A, PAL_DOT);
-        }
-        attract_pill_pal = 0xFF;
-        t = 660;
+      /* Skip remaining timed reveals — still wait for chase delay. */
+      if (t < ATTRACT_CHASE_T0) {
+        if (t < ATTRACT_PTS_T)
+          attract_draw_pts_legend();
+        attract_draw_copyright();
+        poke_tile(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, T_POWER_A, PAL_DOT);
+        poke_pal(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, 0x10);
+        poke_pal(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, 0x10);
+        t = ATTRACT_CHASE_T0;
       }
     }
 
-    /* Ghost intros: 2×3 tiles, then name +1s, nick +0.5s. */
-    for (i = 0; i < 4; i++) {
-      word t_ghost = (word)(60 + (word)i * 120);
-      word t_name = (word)(t_ghost + 60);
-      word t_nick = (word)(t_name + 30);
-      y = (byte)(6 + i * 3);
-      pal = (byte)(1 + i * 2);
-      if (t == t_ghost) attract_draw_ghost(4, y, pal);
-      if (t == t_name)
-        put_string(7, (byte)(y + 1), ghost_names[i], pal);
-      if (t == t_nick)
-        put_string(18, (byte)(y + 1), ghost_nicks[i], pal);
-    }
-
-    /* 10/50 pts legend */
-    if (t == 570) {
-      poke_tile(10, 24, T_DOT_A, PAL_DOT);
-      put_string(12, 24, "10 ", 0x0F);
-      poke_tile(15, 24, TILE_PTS0, 0x0F);
-      poke_tile(16, 24, TILE_PTS1, 0x0F);
-      poke_tile(17, 24, TILE_PTS2, 0x0F);
-      poke_tile(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, T_POWER_A, PAL_DOT);
-      put_string(12, 26, "50 ", 0x0F);
-      poke_tile(15, 26, TILE_PTS0, 0x0F);
-      poke_tile(16, 26, TILE_PTS1, 0x0F);
-      poke_tile(17, 26, TILE_PTS2, 0x0F);
-      attract_pill_pal = 0xFF; /* force pal refresh to include score pill */
-    }
-
-    /* ~1.5s after pts (90 frames): copyright + chase energizer */
-    if (t == 660) {
-      attract_draw_copyright();
-      poke_tile(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, T_POWER_A, PAL_DOT);
-      attract_pill_pal = 0xFF;
-    }
-
-    // if (t >= 630) {
-    //   byte on = (byte)((t & 0x20) == 0);
-    //   if (on != prompt_on) {
-    //     prompt_on = on;
-    //     if (on)
-    //       put_string(7, 31, "PRESS START", 3);
-    //     else
-    //       put_string(7, 31, "           ", 0);
-    //   }
-    // }
-
-    /* Blink score pill once drawn; chase pill after t>=660. */
-    {
-      byte pp = (byte)((anim_ticks & 0x8) ? 0x10 : 0);
-      if (pp != attract_pill_pal) {
-        attract_pill_pal = pp;
-        if (t >= 570)
-          poke_pal(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, pp);
-        if (t >= 660)
-          poke_pal(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, pp);
+    if (!chase_done && t < ATTRACT_CHASE_T0) {
+      /* Ghost intros: 2×3 tiles, then name +1s, nick +0.5s. */
+      for (i = 0; i < GHOST_N; i++) {
+        word t_ghost = (word)(60 + (word)i * 120);
+        word t_name = (word)(t_ghost + 60);
+        word t_nick = (word)(t_name + 30);
+        y = (byte)(6 + i * 3);
+        pal = ghost_pal[i];
+        if (t == t_ghost) attract_draw_ghost(4, y, pal);
+        if (t == t_name)
+          put_string(7, (byte)(y + 1), ghost_names[i], pal);
+        if (t == t_nick)
+          put_string(18, (byte)(y + 1), ghost_nicks[i], pal);
       }
-    }
 
-    if (t != 0xFFFF) t++;
+      if (t == ATTRACT_PTS_T) {
+        attract_draw_pts_legend();
+        /* Solid until chase — no flash during character intro. */
+        poke_pal(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, 0x10);
+      }
+
+      /* copyright + chase energizer */
+      if (t == ATTRACT_COPY_T) {
+        attract_draw_copyright();
+        poke_tile(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, T_POWER_A, PAL_DOT);
+        poke_pal(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, 0x10);
+      }
+
+      if (t != 0xFFFF) t++;
+    } else if (!chase_done) {
+      attract_chase();
+      chase_done = 1;
+      /* Demo over — placeholder for maze attract; wait for START. */
+    } else {
+      poll_credit();
+    }
   }
 
   while (START1) {
@@ -398,6 +625,7 @@ void title_screen(void) {
     poll_credit();
   }
   if (credits) credits--;
+  attract_demo = 0;
   sfx_off();
 }
 
@@ -408,7 +636,7 @@ void show_death(void) {
   for (i = 1; i < 8; i++) hide_sprite(i);
   play_sfx(4);
   for (t = 0; t < 88; t++) {
-    frame = (byte)(SP_DEATH0 + (t / 8));
+    frame = (byte)(SP_DEATH0 + (t >> 3));
     if (frame > SP_DEATH_LAST) frame = SP_DEATH_LAST;
     set_sprite_ex(0, frame, PAL_YELLOW, (byte)(pac_x - 8), (byte)(pac_y - 8), 0);
     wait_vblank();

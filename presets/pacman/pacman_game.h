@@ -53,6 +53,8 @@
 #define PAL_PINKY     0x03
 #define PAL_INKY      0x05
 #define PAL_CLYDE     0x07
+#define PAL_CURLY     22   /* ENABLE_CURLY */
+#define PAL_FRED      23   /* ENABLE_ZOMBIE */
 #define PAL_DOOR      0x18
 
 #define FLIP_X        2
@@ -72,7 +74,29 @@
 #define MODE_LEAVE    5
 #define MODE_ENTER    6
 
+/*
+ * Optional extra ghosts — comment out either define to disable.
+ *   ENABLE_CURLY  → GHOST_N=5  (Curly / "Idiot", pal 22)
+ *   ENABLE_ZOMBIE → GHOST_N=6  (Fred / "Zombie", pal 23; implies Curly)
+ * Fruit sprite shifts up so extras can use HW sprites 5+.
+ */
+#define ENABLE_CURLY
+#define ENABLE_ZOMBIE
+
+#if defined(ENABLE_ZOMBIE) && !defined(ENABLE_CURLY)
+#define ENABLE_CURLY   /* Zombie pack includes Curly */
+#endif
+
+#if defined(ENABLE_ZOMBIE)
+#define GHOST_N       6
+#define SPR_FRUIT     7
+#elif defined(ENABLE_CURLY)
+#define GHOST_N       5
+#define SPR_FRUIT     6
+#else
 #define GHOST_N       4
+#define SPR_FRUIT     5
+#endif
 #define NUM_DOTS      244
 #define EAT_FREEZE_TICKS 60
 
@@ -134,12 +158,18 @@ extern byte tick;
 extern byte pac_stop; /* frames Pac stops after eating */
 extern byte global_dot_mode;
 extern byte global_dot_counter;
+extern byte attract_demo; /* 1 = ignore joystick; pac_want drives Pac */
+extern byte eyes_present; /* cached: any ghost in EYES/ENTER */
 
 extern Ghost ghosts[GHOST_N];
+
+/* Dir tables: index = DIR_* (0=none, 1=R, 2=D, 3=L, 4=U) */
+extern const sbyte dir_dx[5];
+extern const sbyte dir_dy[5];
+extern const byte opp_dir[5];
 
 byte rand8(void);
 byte abs_diff(byte a, byte b);
 byte opposite_dir(byte d);
-void dir_vec(byte d, sbyte* dx, sbyte* dy);
 
 #endif

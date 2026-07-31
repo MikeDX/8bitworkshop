@@ -75,6 +75,8 @@ void play_prelude(void) {
 }
 
 void play_sfx(byte id) {
+  /* Attract chase is silent; coin ding uses id 5 while attract_demo==0. */
+  if (attract_demo) return;
   pac_vblank_hook = pac_sound_vblank;
   if (id && (CH1_W_NUM | CH2_W_NUM)) {
     CH1_W_NUM = CH2_W_NUM = 0;
@@ -113,6 +115,8 @@ void play_sfx(byte id) {
 
 void update_ambient(void) {
   byte want, keep;
+
+  if (attract_demo) return;
 
   pac_vblank_hook = pac_sound_vblank;
 

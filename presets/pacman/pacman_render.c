@@ -26,6 +26,7 @@ byte rand8(void) {
 }
 
 
+#pragma opt_code_size
 void actors_reset_level(void) {
   byte i;
 
@@ -48,65 +49,116 @@ void actors_reset_level(void) {
   pac_stop = 0;
   force_house = 0;
   freeze_ticks = 0;
+  eyes_present = 0;
 
   for (i = 0; i < GHOST_N; i++) {
-    ghosts[i].color = ghost_pal[i];
-    ghosts[i].scat_x = scat_x[i];
-    ghosts[i].scat_y = scat_y[i];
-    ghosts[i].dot_counter = 0;
-    ghosts[i].frac = 0;
-    ghosts[i].speed_sig = 0xff; /* force speed recompute */
+    Ghost* g = &ghosts[i];
+    g->color = ghost_pal[i];
+    g->scat_x = scat_x[i];
+    g->scat_y = scat_y[i];
+    g->dot_counter = 0;
+    g->frac = 0;
+    g->speed_sig = 0xff;
+    g->x = 14 * 8;
+    g->y = 17 * 8 + 4;
+    g->dir = DIR_UP;
+    g->next_dir = DIR_UP;
+    g->mode = MODE_HOUSE;
+    g->in_house = 1;
   }
   set_house_limits();
 
-  /* Blinky outside */
-  ghosts[0].x = 14 * 8;
+  /* Blinky outside (extras may shift him left on the ante row). */
   ghosts[0].y = 14 * 8 + 4;
   ghosts[0].dir = DIR_LEFT;
   ghosts[0].next_dir = DIR_LEFT;
   ghosts[0].mode = MODE_SCATTER;
   ghosts[0].in_house = 0;
 
-  /* Pinky middle house */
-  ghosts[1].x = 14 * 8;
-  ghosts[1].y = 17 * 8 + 4;
+#if defined(ENABLE_ZOMBIE)
+  /* 3 above house over Inky/Pinky/Clyde columns. */
+  ghosts[0].x = 12 * 8;
+  ghosts[4].x = 14 * 8;
+  ghosts[4].y = 14 * 8 + 4;
+  ghosts[4].dir = DIR_LEFT;
+  ghosts[4].next_dir = DIR_LEFT;
+  ghosts[4].mode = MODE_SCATTER;
+  ghosts[4].in_house = 0;
+  ghosts[5].x = 16 * 8;
+  ghosts[5].y = 14 * 8 + 4;
+  ghosts[5].dir = DIR_LEFT;
+  ghosts[5].next_dir = DIR_LEFT;
+  ghosts[5].mode = MODE_SCATTER;
+  ghosts[5].in_house = 0;
+#elif defined(ENABLE_CURLY)
+  /* Curly alone: Blinky left, Curly in classic Blinky slot. */
+  ghosts[0].x = 12 * 8;
+  ghosts[4].x = 14 * 8;
+  ghosts[4].y = 14 * 8 + 4;
+  ghosts[4].dir = DIR_LEFT;
+  ghosts[4].next_dir = DIR_LEFT;
+  ghosts[4].mode = MODE_SCATTER;
+  ghosts[4].in_house = 0;
+#endif
+
+  /* Pinky middle */
   ghosts[1].dir = DIR_DOWN;
   ghosts[1].next_dir = DIR_DOWN;
-  ghosts[1].mode = MODE_HOUSE;
-  ghosts[1].in_house = 1;
 
-  /* Inky left */
+  /* Inky left / Clyde right */
   ghosts[2].x = 12 * 8;
-  ghosts[2].y = 17 * 8 + 4;
-  ghosts[2].dir = DIR_UP;
-  ghosts[2].next_dir = DIR_UP;
-  ghosts[2].mode = MODE_HOUSE;
-  ghosts[2].in_house = 1;
-
-  /* Clyde right */
   ghosts[3].x = 16 * 8;
-  ghosts[3].y = 17 * 8 + 4;
-  ghosts[3].dir = DIR_UP;
-  ghosts[3].next_dir = DIR_UP;
-  ghosts[3].mode = MODE_HOUSE;
-  ghosts[3].in_house = 1;
+}
+
+#pragma opt_code_speed
+byte check_ghost_hits(void) {
+  byte i;
+  byte ptx = (byte)(pac_x >> 3);
+  byte pty = (byte)(pac_y >> 3);
+  Ghost* g = ghosts;
+
+  for (i = 0; i < GHOST_N; i++, g++) {
+    byte mode = g->mode;
+    if (mode >= MODE_EYES)
+      continue;
+    if ((byte)(g->x >> 3) != ptx)
+      continue;
+    if ((byte)(g->y >> 3) != pty)
+      continue;
+    if (mode == MODE_FRIGHT) {
+      byte combo = eat_combo;
+      if (combo > 3) combo = 3;
+      play_sfx(3);
+      if (combo == 0) score += 20;
+      else if (combo == 1) score += 40;
+      else if (combo == 2) score += 80;
+      else score += 160;
+      freeze_score = combo;
+      freeze_ghost = i;
+      freeze_ticks = EAT_FREEZE_TICKS;
+      eat_combo = (byte)(combo + 1);
+      g->mode = MODE_EYES;
+      eyes_present = 1;
+      return 0;
+    }
+    return 1;
+  }
+
+  if (fruit_visible &&
+      (byte)((pac_x + 4) >> 3) == FRUIT_TX &&
+      (byte)(pac_y >> 3) == FRUIT_TY) {
+    score += 10;
+    fruit_visible = 0;
+    fruit_ticks = 90;
+  }
+  return 0;
 }
 
 /* ---- sprite frame tables (dir: 1=R 2=D 3=L 4=U) ---- */
 static const byte pac_flags_tbl[5] = { 0, 0, 0, FLIP_X, FLIP_Y };
-
-/* Boomerang for one axis: closed → partial → wide → partial. phase must be 0..3. */
-static byte pac_shape_for(byte dir, byte phase) {
-  phase &= 3;
-  if (dir == DIR_DOWN || dir == DIR_UP) {
-    if (phase == 0) return SP_CLOSED;
-    if (phase == 2) return SP_PAC_D_WIDE;
-    return SP_PAC_D;
-  }
-  if (phase == 0) return SP_CLOSED;
-  if (phase == 2) return SP_PAC_R_WIDE;
-  return SP_PAC_R;
-}
+/* phase 0..3: closed, partial, wide, partial */
+static const byte pac_shape_h[4] = { SP_CLOSED, SP_PAC_R, SP_PAC_R_WIDE, SP_PAC_R };
+static const byte pac_shape_v[4] = { SP_CLOSED, SP_PAC_D, SP_PAC_D_WIDE, SP_PAC_D };
 
 /* Ghost body base tile per dir; +anim (0/1) selects frame */
 static const byte ghost_dir_base[5] = {
@@ -116,30 +168,40 @@ static const byte score_spr[4] = {
   SP_SCORE200, SP_SCORE400, SP_SCORE800, SP_SCORE1600
 };
 
-/* center → sprite top-left (floooh actor_to_sprite_pos) */
-static void draw_at(byte i, byte shape, byte pal, word cx, word cy, byte fl) {
-  set_sprite_ex(i, shape, pal, (byte)(cx - 8), (byte)(cy - 8), fl);
-}
+/* Sprite top-left from center: sx=cx-8 → reg 239-sx = 247-cx.
+ * Macro (not a call) — draw is ~20% of useful work. */
+#define PAC_DRAW(i, shape, pal, cx, cy, fl) do { \
+  byte* _a = (byte*)(0x4ff0 + ((byte)(i) << 1)); \
+  byte* _p = (byte*)(0x5060 + ((byte)(i) << 1)); \
+  _a[0] = (byte)(((byte)(shape) << 2) | ((byte)(fl) & 3)); \
+  _a[1] = (byte)(pal); \
+  _p[0] = (byte)(247 - (byte)(cx)); \
+  _p[1] = (byte)(280 - (byte)(cy)); \
+} while (0)
 
 void actors_draw_anim(byte animate) {
-  byte i, sh, pal, fl, anim, dir;
+  byte i, sh, pal, anim, dir;
+  byte eyes_pal;
   Ghost* g;
 
   anim = animate ? (byte)((anim_ticks >> 2) & 1) : 0;
+  eyes_pal = attract_demo ? 0 : PAL_EYES;
 
   if (freeze_ticks) {
     hide_sprite(0);
   } else {
     dir = pac_dir;
     if (dir < 1 || dir > 4) dir = DIR_RIGHT;
-    /* READY: animate=0 → closed. Play: pac_anim is already 0..3. */
-    draw_at(0, pac_shape_for(dir, animate ? pac_anim : 0), PAL_YELLOW,
-            pac_x, pac_y, pac_flags_tbl[dir]);
+    {
+      byte phase = animate ? (byte)(pac_anim & 3) : 0;
+      sh = (dir == DIR_UP || dir == DIR_DOWN)
+           ? pac_shape_v[phase] : pac_shape_h[phase];
+    }
+    PAC_DRAW(0, sh, PAL_YELLOW, pac_x, pac_y, pac_flags_tbl[dir]);
   }
 
   for (i = 0; i < GHOST_N; i++) {
     g = &ghosts[i];
-    fl = 0;
     dir = g->dir;
     if (dir > 4) dir = DIR_RIGHT;
 
@@ -149,7 +211,7 @@ void actors_draw_anim(byte animate) {
       pal = PAL_GHOST_SCORE;
     } else if (g->mode == MODE_EYES || g->mode == MODE_ENTER) {
       sh = (byte)(ghost_dir_base[dir] + anim);
-      pal = PAL_EYES;
+      pal = eyes_pal;
     } else if (g->mode == MODE_FRIGHT) {
       sh = (byte)(SP_SCARED0 + anim);
       pal = (power_ticks < 60 && (anim_ticks & 0x10))
@@ -158,69 +220,24 @@ void actors_draw_anim(byte animate) {
       sh = (byte)(ghost_dir_base[dir] + anim);
       pal = g->color;
     }
-    draw_at((byte)(i + 1), sh, pal, g->x, g->y, fl);
+    PAC_DRAW((byte)(i + 1), sh, pal, g->x, g->y, 0);
   }
 
   if (fruit_visible) {
     byte fruit = level;
     if (fruit > 7) fruit = 7;
-    draw_at(5, (byte)(SP_FRUIT0 + fruit), PAL_FRUIT,
+    PAC_DRAW(SPR_FRUIT, (byte)(SP_FRUIT0 + fruit), PAL_FRUIT,
             (word)(FRUIT_TX * 8 + 4), (word)(FRUIT_TY * 8 + 4), 0);
     fruit_visible--;
     fruit_shown = 1;
   } else if (fruit_shown) {
-    hide_sprite(5);
+    hide_sprite(SPR_FRUIT);
     fruit_shown = 0;
   }
 }
 
 void actors_draw(void) {
   actors_draw_anim(1);
-}
-
-byte check_ghost_hits(void) {
-  byte i;
-  byte ptx = tile_x(pac_x);
-  byte pty = tile_y(pac_y);
-  word pts;
-
-  for (i = 0; i < GHOST_N; i++) {
-    Ghost* g = &ghosts[i];
-    if (g->mode == MODE_HOUSE || g->mode == MODE_LEAVE ||
-        g->mode == MODE_EYES || g->mode == MODE_ENTER)
-      continue;
-    if (tile_x(g->x) == ptx && tile_y(g->y) == pty) {
-      if (g->mode == MODE_FRIGHT) {
-        play_sfx(3);
-        if (eat_combo > 3) eat_combo = 3;
-        /* Inlined — no INITIALIZED table (overlaps tile_rom in IHX). */
-        if (eat_combo == 0) pts = 20;
-        else if (eat_combo == 1) pts = 40;
-        else if (eat_combo == 2) pts = 80;
-        else pts = 160;
-        score += pts;
-        freeze_score = eat_combo;
-        freeze_ghost = i;
-        freeze_ticks = EAT_FREEZE_TICKS;
-        eat_combo++;
-        g->mode = MODE_EYES;
-        return 0; /* freeze handled by game loop; don't also die */
-      } else if (g->mode == MODE_CHASE || g->mode == MODE_SCATTER) {
-        return 1;
-      }
-    }
-  }
-
-  if (fruit_visible) {
-    byte ftx = tile_x((word)(pac_x + 4));
-    byte fty = tile_y(pac_y);
-    if (ftx == FRUIT_TX && fty == FRUIT_TY) {
-      score += 10;
-      fruit_visible = 0;
-      fruit_ticks = 90; /* ambient owns CH2_FRUIT bit */
-    }
-  }
-  return 0;
 }
 
 /* Advance 8.8 accumulator; return whole pixels to step this frame. */
@@ -233,15 +250,49 @@ byte take_steps(word* frac, word speed) {
 void pac_update(void) {
   byte tx, ty, steps, s, moved;
 
-  if (LEFT1) pac_want = DIR_LEFT;
-  if (RIGHT1) pac_want = DIR_RIGHT;
-  if (UP1) pac_want = DIR_UP;
-  if (DOWN1) pac_want = DIR_DOWN;
+  if (!attract_demo) {
+    if (LEFT1) pac_want = DIR_LEFT;
+    if (RIGHT1) pac_want = DIR_RIGHT;
+    if (UP1) pac_want = DIR_UP;
+    if (DOWN1) pac_want = DIR_DOWN;
+  }
 
   /* Dot/energizer pause: skip movement only this/these frames, then
    * resume full pac_speed_fp() — ghosts keep moving meanwhile. */
   if (pac_stop) {
     pac_stop--;
+    return;
+  }
+
+  /* Attract corridor: X-only, no tunnel wrap (spawn/enter from off-screen). */
+  if (attract_demo) {
+    if (pac_want != pac_dir)
+      pac_dir = pac_want;
+    moved = 0;
+    steps = take_steps(&pac_frac, pac_speed_fp());
+    for (s = 0; s < steps; s++) {
+      if (pac_dir == DIR_LEFT) {
+        if (pac_x > 0) pac_x--;
+        else break;
+      } else if (pac_dir == DIR_RIGHT) {
+        if (pac_x < 255) pac_x++;
+        else break;
+      } else
+        break;
+      moved = 1;
+    }
+    pac_y = (word)(20 * 8 + 4);
+    if (moved)
+      pac_anim = (byte)((pac_anim + 1) & 3);
+    if (pac_x >= 8 && pac_x < 224) {
+      tx = tile_x(pac_x);
+      ty = tile_y(pac_y);
+      if (tx != pac_eat_tx || ty != pac_eat_ty) {
+        pac_eat_tx = tx;
+        pac_eat_ty = ty;
+        try_eat_tile(tx, ty);
+      }
+    }
     return;
   }
 
@@ -278,9 +329,14 @@ void ghosts_update(void) {
     round_ticks++;
   force_house++;
 
+  ghost_frame_begin(); /* phase_mode once for all ghosts */
+  eyes_present = 0;
+
   for (i = 0; i < GHOST_N; i++) {
     update_ghost_state(i);
     g = &ghosts[i];
+    if (g->mode == MODE_EYES || g->mode == MODE_ENTER)
+      eyes_present = 1;
     steps = take_steps(&g->frac, ghost_speed_cached(g));
     for (s = 0; s < steps; s++) {
       byte mode = g->mode;
@@ -299,5 +355,3 @@ void ghosts_update(void) {
     }
   }
 }
-
-void release_ghosts(void) { }

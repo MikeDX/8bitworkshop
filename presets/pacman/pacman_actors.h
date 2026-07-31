@@ -9,7 +9,6 @@ void ghosts_update(void);
 void actors_draw(void);
 void actors_draw_anim(byte animate);
 byte check_ghost_hits(void); /* 1 = pac died */
-void release_ghosts(void);
 
 /* Used by pacman_render.c (low CODE) */
 byte tile_x(word px);
@@ -23,6 +22,7 @@ byte take_steps(word* frac, word speed);
 byte update_ghost_dir(byte i);
 void update_ghost_state(byte i);
 void set_house_limits(void);
+void ghost_frame_begin(void); /* cache scatter/chase for this frame */
 
 
 #endif
