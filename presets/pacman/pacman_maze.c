@@ -5,25 +5,37 @@
 
 /*
  * Playfield tile map is pre-baked by scripts/gen_pacman_assets.py (maze_tiles).
+ *
+ * Pac-Man middle VRAM (screen y=2..33) is stored as 28 vertical strips of 32
+ * bytes at 0x4040 / 0x4440: strip s holds screen x = 27-s, with byte
+ * (y-2) along the strip. Maze rows 0..30 sit at screen y=3..33 → strip
+ * offsets 1..31. Drawing walks those addresses forward instead of poke_tile.
  */
-#define MAZE_Y0  3
-#define MAZE_ROWS 31
+#define MAZE_Y0    3
+#define MAZE_ROWS  31
+#define VRAM_MID   ((byte*)0x4040)
+#define CRAM_MID   ((byte*)0x4440)
 
 static byte maze_src(byte row, byte col) {
   return maze_tiles[(word)row * 28 + col];
 }
 
 void draw_maze(void) {
-  byte row, col;
-  byte tile, pal;
-  for (row = 0; row < MAZE_ROWS; row++) {
+  byte strip; /* 0 = screen x=27 … 27 = screen x=0 */
+  for (strip = 0; strip < 28; strip++) {
+    byte x = (byte)(27 - strip);
+    byte row;
+    /* Skip strip offset 0 (screen y=2, above maze); write offsets 1..31. */
+    byte* v = VRAM_MID + (word)strip * 32 + 1;
+    byte* c = CRAM_MID + (word)strip * 32 + 1;
     watchdog = 0;
-    for (col = 0; col < 28; col++) {
-      tile = maze_src(row, col);
-      pal = PAL_DOT;
+    for (row = 0; row < MAZE_ROWS; row++) {
+      byte tile = maze_src(row, x);
+      byte pal = PAL_DOT;
       if (tile == T_DOOR) pal = PAL_DOOR;
       else if (tile >= 0xC0) pal = PAL_MAZE;
-      poke_tile(col, (byte)(row + MAZE_Y0), tile, pal);
+      *v++ = tile;
+      *c++ = pal;
     }
   }
 }

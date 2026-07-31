@@ -103,6 +103,7 @@ typedef struct {
 
 extern word rnd;
 extern word score;
+extern word hiscore;
 extern word power_ticks;
 extern word anim_ticks;
 extern word round_ticks;
@@ -116,6 +117,7 @@ extern word pac_frac;        /* 8.8 movement accumulator */
 
 extern byte lives;
 extern byte level;
+extern byte credits; /* 0..99 */
 extern byte dots_left;
 extern byte dots_eaten;
 extern byte game_over;

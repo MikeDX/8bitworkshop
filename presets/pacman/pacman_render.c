@@ -9,10 +9,11 @@ extern const byte scat_x[GHOST_N];
 extern const byte scat_y[GHOST_N];
 
 /* Last tile where we already tried to eat — peek only on tile entry. */
-static byte pac_eat_tx = 0xff;
-static byte pac_eat_ty = 0xff;
+static byte pac_eat_tx;
+static byte pac_eat_ty;
 static byte fruit_shown;
-static byte pac_anim; /* mouth phase; advances only while moving */
+/* Mouth phase — ALWAYS 0..3 (closed, partial, wide, partial). Tick only if moved. */
+static byte pac_anim;
 
 byte abs_diff(byte a, byte b) {
   return (a > b) ? (byte)(a - b) : (byte)(b - a);
@@ -92,14 +93,20 @@ void actors_reset_level(void) {
 }
 
 /* ---- sprite frame tables (dir: 1=R 2=D 3=L 4=U) ---- */
-/* Pac mouth cycle: closed → partial → wide → partial */
-static const byte pac_shape_tbl[4][4] = {
-  /* R */ { SP_CLOSED, SP_PAC_R, SP_PAC_R_WIDE, SP_PAC_R },
-  /* D */ { SP_CLOSED, SP_PAC_D, SP_PAC_D_WIDE, SP_PAC_D },
-  /* L */ { SP_CLOSED, SP_PAC_R, SP_PAC_R_WIDE, SP_PAC_R },
-  /* U */ { SP_CLOSED, SP_PAC_D, SP_PAC_D_WIDE, SP_PAC_D },
-};
 static const byte pac_flags_tbl[5] = { 0, 0, 0, FLIP_X, FLIP_Y };
+
+/* Boomerang for one axis: closed → partial → wide → partial. phase must be 0..3. */
+static byte pac_shape_for(byte dir, byte phase) {
+  phase &= 3;
+  if (dir == DIR_DOWN || dir == DIR_UP) {
+    if (phase == 0) return SP_CLOSED;
+    if (phase == 2) return SP_PAC_D_WIDE;
+    return SP_PAC_D;
+  }
+  if (phase == 0) return SP_CLOSED;
+  if (phase == 2) return SP_PAC_R_WIDE;
+  return SP_PAC_R;
+}
 
 /* Ghost body base tile per dir; +anim (0/1) selects frame */
 static const byte ghost_dir_base[5] = {
@@ -114,18 +121,19 @@ static void draw_at(byte i, byte shape, byte pal, word cx, word cy, byte fl) {
   set_sprite_ex(i, shape, pal, (byte)(cx - 8), (byte)(cy - 8), fl);
 }
 
-void actors_draw(void) {
+void actors_draw_anim(byte animate) {
   byte i, sh, pal, fl, anim, dir;
   Ghost* g;
 
-  anim = (byte)((anim_ticks >> 2) & 1); /* half previous flip rate */
+  anim = animate ? (byte)((anim_ticks >> 2) & 1) : 0;
 
   if (freeze_ticks) {
     hide_sprite(0);
   } else {
     dir = pac_dir;
     if (dir < 1 || dir > 4) dir = DIR_RIGHT;
-    draw_at(0, pac_shape_tbl[dir - 1][pac_anim & 3], PAL_YELLOW,
+    /* READY: animate=0 → closed. Play: pac_anim is already 0..3. */
+    draw_at(0, pac_shape_for(dir, animate ? pac_anim : 0), PAL_YELLOW,
             pac_x, pac_y, pac_flags_tbl[dir]);
   }
 
@@ -166,11 +174,15 @@ void actors_draw(void) {
   }
 }
 
+void actors_draw(void) {
+  actors_draw_anim(1);
+}
+
 byte check_ghost_hits(void) {
   byte i;
   byte ptx = tile_x(pac_x);
   byte pty = tile_y(pac_y);
-  static const word eat_pts[4] = { 20, 40, 80, 160 };
+  word pts;
 
   for (i = 0; i < GHOST_N; i++) {
     Ghost* g = &ghosts[i];
@@ -181,7 +193,12 @@ byte check_ghost_hits(void) {
       if (g->mode == MODE_FRIGHT) {
         play_sfx(3);
         if (eat_combo > 3) eat_combo = 3;
-        score += eat_pts[eat_combo];
+        /* Inlined — no INITIALIZED table (overlaps tile_rom in IHX). */
+        if (eat_combo == 0) pts = 20;
+        else if (eat_combo == 1) pts = 40;
+        else if (eat_combo == 2) pts = 80;
+        else pts = 160;
+        score += pts;
         freeze_score = eat_combo;
         freeze_ghost = i;
         freeze_ticks = EAT_FREEZE_TICKS;
@@ -214,7 +231,7 @@ byte take_steps(word* frac, word speed) {
 }
 
 void pac_update(void) {
-  byte tx, ty, steps, s;
+  byte tx, ty, steps, s, moved;
 
   if (LEFT1) pac_want = DIR_LEFT;
   if (RIGHT1) pac_want = DIR_RIGHT;
@@ -228,6 +245,7 @@ void pac_update(void) {
     return;
   }
 
+  moved = 0;
   steps = take_steps(&pac_frac, pac_speed_fp());
   for (s = 0; s < steps; s++) {
     /* Cornering / reverse: only probe when player asks for a new dir.
@@ -237,8 +255,11 @@ void pac_update(void) {
     if (!can_move(pac_x, pac_y, pac_dir, 1))
       break;
     move_pos(&pac_x, &pac_y, pac_dir, 1);
-    pac_anim++; /* mouth cycles with travel, freezes when blocked/paused */
+    moved = 1;
   }
+  /* Simple rule: moved → tick (clamped 0..3). stopped → freeze. */
+  if (moved)
+    pac_anim = (byte)((pac_anim + 1) & 3);
 
   tx = tile_x(pac_x);
   ty = tile_y(pac_y);

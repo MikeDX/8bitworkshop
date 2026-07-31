@@ -2,7 +2,7 @@
  * Pac-Man — C clone on Pac-Man hardware (Namco gfx + ROM sound driver).
  *
  * Regenerate assets/sound: python3 scripts/gen_pacman_assets.py
- * Sound engine is relocatable ASM in pacman_sound.c (NMI calls symbols).
+ * Sound engine is relocatable ASM in pacman_sound.c (VBLANK hook).
  *
  * Controls: D-pad move, Start from title / after death.
  */
@@ -22,8 +22,9 @@
 #include "pacman_actors.h"
 
 /* ---- globals ---- */
-word rnd = 0xCACE;
+word rnd;
 word score;
+word hiscore;
 word power_ticks;
 word anim_ticks;
 word round_ticks;
@@ -37,6 +38,7 @@ word pac_frac;
 
 byte lives;
 byte level;
+byte credits; /* 0..99 — attract / start gate */
 byte dots_left;
 byte dots_eaten;
 byte game_over;
@@ -56,171 +58,353 @@ byte global_dot_counter;
 
 Ghost ghosts[GHOST_N];
 
-void start(void) __naked {
-__asm
-        jp      real_start
+static word hud_score;
+static word hud_hiscore;
+static byte hud_ready; /* 0 = force labels */
 
-        .ds     0x0010 - (. - _start)
-        ; RST 10/18/20 from pacman.6e
-        .db 0x85,0x6f,0x3e,0x00,0x8c,0x67,0x7e,0xc9,0x78,0x87,0xd7,0x5f,0x23,0x56,0xeb,0xc9
-        .db 0xe1,0x87,0xd7,0x5f,0x23,0x56,0xeb,0xe9
-        .ds     0x0066 - (. - _start)
+/* Arcade energizer tile positions (screen coords). */
+static const byte pill_x[4] = { 1, 26, 1, 26 };
+static const byte pill_y[4] = { 6, 6, 26, 26 };
 
-        push    af
-        push    bc
-        push    de
-        push    hl
-        push    ix
-        push    iy
+/*
+ * Pixel (py, px) → tile: ty = py/8, tx = 27 - px/8
+ *   1UP         (0,192) → (3,0)
+ *   HIGH SCORE  (0,144) → (9,0)
+ *   2UP         (0,40)  → (22,0)
+ *   PLAYER ONE  (112,144) → (9,14)
+ *   READY!      (160,128) → (11,20)
+ *   chase pill  (160,184) → (4,20)
+ *   score pill  (208,136) → (10,26)
+ */
 
-        ld      hl, #0x4e8c
-        ld      de, #0x5050
-        ld      bc, #0x0010
-        ldir
-
-        ld      a, (0x4ecc)
-        and     a
-        ld      a, (0x4ecf)
-        jr      nz, 00010$
-        ld      a, (0x4e9f)
-00010$:
-        ld      (0x5045), a
-        ld      a, (0x4edc)
-        and     a
-        ld      a, (0x4edf)
-        jr      nz, 00011$
-        ld      a, (0x4eaf)
-00011$:
-        ld      (0x504a), a
-        ld      a, (0x4eec)
-        and     a
-        ld      a, (0x4eef)
-        jr      nz, 00012$
-        ld      a, (0x4ebf)
-00012$:
-        ld      (0x504f), a
-
-        call    _pac_sound_effects
-        call    _pac_sound_engine
-
-        ld      a, (_fright_on)
-        or      a
-        call    nz, _tick_fright
-
-        ld      hl, #0x4c84
-        inc     (hl)
-
-        ld      a, (_video_framecount)
-        inc     a
-        ld      (_video_framecount), a
-
-        pop     iy
-        pop     ix
-        pop     hl
-        pop     de
-        pop     bc
-        pop     af
-        retn
-
-real_start:
-        ld      sp, #0x4fc0
-        ld      bc, #l__INITIALIZER
-        ld      a, b
-        or      a, c
-        jr      z, 00001$
-        ld      de, #s__INITIALIZED
-        ld      hl, #s__INITIALIZER
-        ldir
-00001$:
-        ld      hl, #0x4e8c
-        ld      de, #0x4e8d
-        ld      (hl), #0
-        ld      bc, #0x006f
-        ldir
-        xor     a
-        ld      (0x4c84), a
-        jp      _main
-__endasm;
+/* Write tile only — top HUD rows keep pal 0xF (1UP flash flips pal alone). */
+static void poke_tile_only(byte x, byte y, byte tile) {
+  if (x >= 28 || y >= 36) return;
+  *((byte*)(0x4000 + vram_addr(x, y))) = tile;
 }
 
-static word hud_score;
-static byte hud_lives, hud_level;
-static byte hud_ready; /* 0 = force full chrome + digits */
+/* Right-aligned score ending at (x,y); at least "00". Tile updates only.
+ * Scores never shrink — no leading blanking (row cleared once on HUD force). */
+static void draw_score_r(byte x, byte y, word n) {
+  byte d0, d1, d2, d3, d4;
+  word v = n;
+  byte pos;
 
-/* Decimal digits without Z80 16-bit / and % (those blow the frame budget). */
-static void word_to_4digits(word n, byte* d) {
-  d[0] = 0;
-  while (n >= 1000) { n = (word)(n - 1000); d[0]++; }
-  d[1] = 0;
-  while (n >= 100) { n = (word)(n - 100); d[1]++; }
-  d[2] = 0;
-  while (n >= 10) { n = (word)(n - 10); d[2]++; }
-  d[3] = (byte)n;
+  d0 = 0; while (v >= 10000) { v = (word)(v - 10000); d0++; }
+  d1 = 0; while (v >= 1000) { v = (word)(v - 1000); d1++; }
+  d2 = 0; while (v >= 100) { v = (word)(v - 100); d2++; }
+  d3 = 0; while (v >= 10) { v = (word)(v - 10); d3++; }
+  d4 = (byte)v;
+
+  pos = x;
+  poke_tile_only(pos, y, (byte)('0')); /* trailing 0 (arcade points×10 look) */
+  pos--;
+  poke_tile_only(pos, y, (byte)('0' + d4));
+  if (n >= 10) { pos--; poke_tile_only(pos, y, (byte)('0' + d3)); }
+  if (n >= 100) { pos--; poke_tile_only(pos, y, (byte)('0' + d2)); }
+  if (n >= 1000) { pos--; poke_tile_only(pos, y, (byte)('0' + d1)); }
+  if (n >= 10000) { pos--; poke_tile_only(pos, y, (byte)('0' + d0)); }
+}
+
+/* Active-player "1UP" blinks via color RAM only (arcade). */
+static byte flash_1up_pal; /* 0 = unset; set on first flash / HUD force */
+
+static void flash_1up(void) {
+  byte pal = (anim_ticks & 0x10) ? 0x0F : 0;
+  if (pal == flash_1up_pal) return;
+  flash_1up_pal = pal;
+  poke_pal(3, 0, pal);
+  poke_pal(4, 0, pal);
+  poke_pal(5, 0, pal);
+}
+
+/* Energizer blink (pal 0x10 / 0). Solid only during READY banner. */
+static byte flash_pill_pal;
+
+static void flash_power_pills(byte blinking) {
+  byte i, pal;
+  pal = blinking ? ((anim_ticks & 0x8) ? 0x10 : 0) : 0x10;
+  if (pal == flash_pill_pal) return;
+  flash_pill_pal = pal;
+  for (i = 0; i < 4; i++)
+    poke_pal(pill_x[i], pill_y[i], pal);
 }
 
 void draw_hud(void) {
-  byte dig[4], old[4];
-  byte i;
   byte force = (byte)(hud_ready == 0);
+  byte i;
 
-  if (!force && score == hud_score && lives == hud_lives && level == hud_level)
+  if (score > hiscore) hiscore = score;
+
+  if (!force && score == hud_score && hiscore == hud_hiscore)
     return;
 
   if (force) {
-    put_string(1, 0, "1UP", PAL_CYAN);
-    put_string(12, 0, "L", PAL_YELLOW);
-    put_string(1, 34, "LIVES", PAL_CYAN);
+    /* Entire top two rows: tiles + pal 0xF once; later frames only change tiles. */
+    for (i = 0; i < 28; i++) {
+      poke_tile(i, 0, T_BLANK, 0x0F);
+      poke_tile(i, 1, T_BLANK, 0x0F);
+    }
+    put_string(3, 0, "1UP", 0x0F);
+    put_string(9, 0, "HIGH SCORE", 0x0F);
+    put_string(22, 0, "2UP", 0x0F);
+    flash_1up_pal = 0x0F;
   }
 
   if (force || score != hud_score) {
-    word_to_4digits(score, dig);
-    word_to_4digits(force ? 0 : hud_score, old);
-    for (i = 0; i < 4; i++) {
-      if (force || dig[i] != old[i])
-        put_digit((byte)(5 + i), 0, dig[i], PAL_WHITE);
-    }
+    draw_score_r(6, 1, score);
     hud_score = score;
   }
-
-  if (force || lives != hud_lives) {
-    put_digit(7, 34, lives > 9 ? 9 : lives, PAL_YELLOW);
-    hud_lives = lives;
-  }
-
-  if (force || level != hud_level) {
-    put_digit(13, 0, (byte)((level + 1) % 10), PAL_YELLOW);
-    hud_level = level;
+  if (force || hiscore != hud_hiscore) {
+    draw_score_r(16, 1, hiscore);
+    hud_hiscore = hiscore;
   }
 
   hud_ready = 1;
 }
 
+/*
+ * New game: prelude with PLAYER ONE + READY!, sprites hidden for first half
+ * (~2s), then clear PLAYER ONE and reveal actors for READY phase (~2s).
+ * After death / next level: READY! with actors visible only.
+ */
+static void show_ready_banner(byte player_one) {
+  byte t;
+
+  flash_power_pills(0); /* solid during READY (not blinking) */
+  put_string(11, 20, "READY!", 9);
+  if (player_one) {
+    put_string(9, 14, "PLAYER ONE", 5);
+    hide_all_sprites();
+    play_prelude();
+    for (t = 0; t < 120; t++) {
+      wait_vblank();
+      watchdog = 0;
+      anim_ticks++;
+      flash_1up();
+    }
+    put_string(9, 14, "          ", 0);
+  }
+
+  for (t = 0; t < 130; t++) {
+    wait_vblank();
+    watchdog = 0;
+    anim_ticks++;
+    flash_1up();
+    actors_draw_anim(0);
+  }
+  put_string(11, 20, "      ", 0);
+}
+
+/*
+ * Attract / intro (floooh intro_tick timing). Chase demo omitted for now.
+ * Coin adds a credit (cap 99), plays ding, and aborts the slow intro so
+ * START can begin a game once credits > 0.
+ */
+#define TILE_PTS0        0x5D
+#define TILE_PTS1        0x5E
+#define TILE_PTS2        0x5F
+#define TILE_COPYRIGHT   0x5C  /* (C) */
+#define TILE_PERIOD      0x25  /* . */
+
+/* Soft ghost: 2×3 tile stamp (sprites free for chase later). */
+static void attract_draw_ghost(byte x, byte y, byte pal) {
+  poke_tile(x, y,                         0xB0, pal);
+  poke_tile((byte)(x + 1), y,             0xB1, pal);
+  poke_tile(x, (byte)(y + 1),             0xB2, pal);
+  poke_tile((byte)(x + 1), (byte)(y + 1), 0xB3, pal);
+  poke_tile(x, (byte)(y + 2),             0xB4, pal);
+  poke_tile((byte)(x + 1), (byte)(y + 2), 0xB5, pal);
+}
+
+/* Attract energizers — arcade pixel (py,px) → tile via comment above.
+ *   chase pill  (160,184) → (4,20)
+ *   score legend (208,136) → (10,26)  drawn at t==570 with "50 PTS"
+ */
+#define ATTRACT_CHASE_PX  4
+#define ATTRACT_CHASE_PY  20
+#define ATTRACT_SCORE_PX  10
+#define ATTRACT_SCORE_PY  26
+
+/* "CREDIT  0" / "CREDIT 10" — arcade spacing (two spaces if <10, one if ≥10). */
+static void draw_credits(void) {
+  byte n = credits;
+  put_string(3, 35, "CREDIT", 0x0F);
+  if (n > 99) n = 99;
+  if (n < 10) {
+    poke_tile(9, 35, T_BLANK, 0x0F);
+    poke_tile(10, 35, T_BLANK, 0x0F);
+    poke_tile(11, 35, (byte)('0' + n), 0x0F);
+  } else {
+    poke_tile(9, 35, T_BLANK, 0x0F);
+    poke_tile(10, 35, (byte)('0' + n / 10), 0x0F);
+    poke_tile(11, 35, (byte)('0' + n % 10), 0x0F);
+  }
+}
+
+/* Edge-detect coin → credit + ding. Returns 1 if a credit was added. */
+static byte coin_was_down;
+
+static byte poll_credit(void) {
+  byte down = COIN1 ? 1 : 0;
+  byte added = 0;
+  if (down && !coin_was_down) {
+    if (credits < 99) {
+      credits++;
+      play_sfx(5);
+      draw_credits();
+      added = 1;
+    }
+  }
+  coin_was_down = down;
+  return added;
+}
+
+static void attract_draw_copyright(void) {
+  /* (C) 1980 MIDWAY MFG.CO. — arcade tile (4,28), pal 3 */
+  poke_tile(4, 31, TILE_COPYRIGHT, 3);
+  poke_tile(5, 31, T_BLANK, 3);
+  put_string(6, 31, "1981 DX AUTOMATICS", 3);
+
+  // put_string(6, 28, "1980 MIDWAY MFG", 3);
+  // poke_tile(21, 28, TILE_PERIOD, 3);
+  // put_string(22, 28, "CO", 3);
+  // poke_tile(24, 28, TILE_PERIOD, 3);
+}
+
+/* Fixed-width rows in CODE — `[][]` / pointer tables are invalid or hit _INITIALIZED. */
+static const char ghost_names[4][9] = {
+  "-SHADOW", "-SPEEDY", "-BASHFUL", "-POKEY"
+};
+static const char ghost_nicks[4][9] = {
+  "\"BLINKY\"", "\"PINKY\"", "\"INKY\"", "\"CLYDE\""
+};
+
 void title_screen(void) {
+  word t;
+  byte i, y, pal;
+  byte prompt_on = 0xFF;
+  byte attract_pill_pal = 0xFF;
+
   clrscr(0);
   hide_all_sprites();
-  put_string(10, 8, "PAC-MAN", PAL_YELLOW);
-  put_string(6, 12, "C ON NAMCO HW", PAL_CYAN);
-  put_string(6, 30, "PRESS START", PAL_WHITE);
-  set_sprite_ex(0, SP_OPEN1, PAL_YELLOW, 72, 160, 0);
-  set_sprite_ex(1, SP_GHOST_R0, PAL_RED, 100, 160, 0);
-  set_sprite_ex(2, SP_GHOST_R0, PAL_PINK, 120, 160, 0);
-  set_sprite_ex(3, SP_GHOST_R0, PAL_CYAN, 140, 160, 0);
-  set_sprite_ex(4, SP_GHOST_R0, PAL_ORANGE, 160, 160, 0);
-  play_prelude();
-  while (!(START1 || FIRE1)) {
+  sfx_off();
+  coin_was_down = COIN1 ? 1 : 0;
+
+  /* Player score shows 00 on attract; keep hiscore. */
+  score = 0;
+  hud_ready = 0;
+  draw_hud();
+  put_string(7, 5, "CHARACTER / NICKNAME", 0x0F);
+  draw_credits();
+
+  t = 0;
+  /* START with credits, or coin aborts intro early then wait for START. */
+  while (!(START1 && credits)) {
     wait_vblank();
     watchdog = 0;
+    anim_ticks++;
+
+    if (poll_credit()) {
+      /* Skip remaining timed reveals — stay in wait-for-START. */
+      if (t < 660) {
+        if (t < 570) {
+          /* pts legend not shown yet — draw it so abort looks complete */
+          poke_tile(10, 24, T_DOT_A, PAL_DOT);
+          put_string(12, 24, "10 ", 0x0F);
+          poke_tile(15, 24, TILE_PTS0, 0x0F);
+          poke_tile(16, 24, TILE_PTS1, 0x0F);
+          poke_tile(17, 24, TILE_PTS2, 0x0F);
+          poke_tile(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, T_POWER_A, PAL_DOT);
+          put_string(12, 26, "50 ", 0x0F);
+          poke_tile(15, 26, TILE_PTS0, 0x0F);
+          poke_tile(16, 26, TILE_PTS1, 0x0F);
+          poke_tile(17, 26, TILE_PTS2, 0x0F);
+        }
+        if (t < 660) {
+          attract_draw_copyright();
+          poke_tile(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, T_POWER_A, PAL_DOT);
+        }
+        attract_pill_pal = 0xFF;
+        t = 660;
+      }
+    }
+
+    /* Ghost intros: 2×3 tiles, then name +1s, nick +0.5s. */
+    for (i = 0; i < 4; i++) {
+      word t_ghost = (word)(60 + (word)i * 120);
+      word t_name = (word)(t_ghost + 60);
+      word t_nick = (word)(t_name + 30);
+      y = (byte)(6 + i * 3);
+      pal = (byte)(1 + i * 2);
+      if (t == t_ghost) attract_draw_ghost(4, y, pal);
+      if (t == t_name)
+        put_string(7, (byte)(y + 1), ghost_names[i], pal);
+      if (t == t_nick)
+        put_string(18, (byte)(y + 1), ghost_nicks[i], pal);
+    }
+
+    /* 10/50 pts legend */
+    if (t == 570) {
+      poke_tile(10, 24, T_DOT_A, PAL_DOT);
+      put_string(12, 24, "10 ", 0x0F);
+      poke_tile(15, 24, TILE_PTS0, 0x0F);
+      poke_tile(16, 24, TILE_PTS1, 0x0F);
+      poke_tile(17, 24, TILE_PTS2, 0x0F);
+      poke_tile(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, T_POWER_A, PAL_DOT);
+      put_string(12, 26, "50 ", 0x0F);
+      poke_tile(15, 26, TILE_PTS0, 0x0F);
+      poke_tile(16, 26, TILE_PTS1, 0x0F);
+      poke_tile(17, 26, TILE_PTS2, 0x0F);
+      attract_pill_pal = 0xFF; /* force pal refresh to include score pill */
+    }
+
+    /* ~1.5s after pts (90 frames): copyright + chase energizer */
+    if (t == 660) {
+      attract_draw_copyright();
+      poke_tile(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, T_POWER_A, PAL_DOT);
+      attract_pill_pal = 0xFF;
+    }
+
+    // if (t >= 630) {
+    //   byte on = (byte)((t & 0x20) == 0);
+    //   if (on != prompt_on) {
+    //     prompt_on = on;
+    //     if (on)
+    //       put_string(7, 31, "PRESS START", 3);
+    //     else
+    //       put_string(7, 31, "           ", 0);
+    //   }
+    // }
+
+    /* Blink score pill once drawn; chase pill after t>=660. */
+    {
+      byte pp = (byte)((anim_ticks & 0x8) ? 0x10 : 0);
+      if (pp != attract_pill_pal) {
+        attract_pill_pal = pp;
+        if (t >= 570)
+          poke_pal(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, pp);
+        if (t >= 660)
+          poke_pal(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, pp);
+      }
+    }
+
+    if (t != 0xFFFF) t++;
   }
-  while (START1 || FIRE1) {
+
+  while (START1) {
     wait_vblank();
     watchdog = 0;
+    poll_credit();
   }
+  if (credits) credits--;
   sfx_off();
 }
 
 void show_death(void) {
   byte t, frame;
   byte i;
+  word timeout;
   for (i = 1; i < 8; i++) hide_sprite(i);
   play_sfx(4);
   for (t = 0; t < 88; t++) {
@@ -232,13 +416,16 @@ void show_death(void) {
     if (t == 72) CH3_E_NUM = 0x20;
   }
   hide_sprite(0);
-  while (CH3_E_NUM & 0x20) {
+  /* Wait for coda bits to clear — timeout if engine missed a frame. */
+  timeout = 180;
+  while ((CH3_E_NUM & 0x20) && timeout--) {
     wait_vblank();
     watchdog = 0;
   }
   wait_vblank();
   CH3_E_NUM = 0x20;
-  while (CH3_E_NUM & 0x20) {
+  timeout = 180;
+  while ((CH3_E_NUM & 0x20) && timeout--) {
     wait_vblank();
     watchdog = 0;
   }
@@ -246,38 +433,25 @@ void show_death(void) {
 }
 
 void show_game_over(void) {
-  put_string(9, 16, "GAME OVER", PAL_RED);
-  put_string(6, 18, "PRESS START", PAL_WHITE);
-  while (!(START1 || FIRE1)) {
-    wait_vblank();
-    watchdog = 0;
-  }
-  while (START1 || FIRE1) {
+  byte t;
+  /* Pixel (160,144) → tile (9,20); arcade uses pal 1. */
+  put_string(9, 20, "GAME OVER", 1);
+  for (t = 0; t < 180; t++) {
     wait_vblank();
     watchdog = 0;
   }
 }
 
-void start_round(void) {
+void start_round(byte player_one) {
   hide_all_sprites();
   draw_maze();
   count_dots();
   actors_reset_level();
-  hud_ready = 0; /* force HUD chrome + digits */
+  hud_ready = 0;
   draw_hud();
   sfx_off();
   update_ambient();
-  /* brief ready pause */
-  {
-    byte t;
-    put_string(11, 16, "READY", PAL_YELLOW);
-    for (t = 0; t < 90; t++) {
-      wait_vblank();
-      watchdog = 0;
-      actors_draw();
-    }
-    put_string(11, 16, "     ", 0);
-  }
+  show_ready_banner(player_one);
 }
 
 void next_level(void) {
@@ -290,7 +464,7 @@ void next_level(void) {
   if (level < 255) level++;
   global_dot_mode = 0;
   global_dot_counter = 0;
-  start_round();
+  start_round(0);
 }
 
 void game_loop(void) {
@@ -301,7 +475,7 @@ void game_loop(void) {
   global_dot_mode = 0;
   global_dot_counter = 0;
   clrscr(0);
-  start_round();
+  start_round(1);
 
   while (!game_over) {
     wait_vblank();
@@ -314,6 +488,9 @@ void game_loop(void) {
       /* timers still advance during eat-freeze (arcade-like) */
       if (power_ticks) power_ticks--;
       update_ambient();
+      draw_hud();
+      flash_1up();
+      flash_power_pills(1); /* keep blinking while ghost-eat freeze */
       actors_draw();
       continue;
     }
@@ -334,11 +511,14 @@ void game_loop(void) {
       actors_reset_level();
       draw_hud();
       update_ambient();
+      show_ready_banner(0);
     }
 
     if (power_ticks) power_ticks--;
     update_ambient();
     draw_hud();
+    flash_1up();
+    flash_power_pills(1);
     actors_draw();
 
     if (!dots_left)
@@ -347,11 +527,13 @@ void game_loop(void) {
 }
 
 void main(void) {
-  interrupt_enable = 1;
   sound_enable = 1;
   flip_screen = 0;
   watchdog = 0;
   video_framecount = 0;
+  rnd = 0xCACE;
+  sfx_off(); /* arms pac_vblank_hook + clears WSG */
+  pac_irq_enable();
 
   while (1) {
     title_screen();

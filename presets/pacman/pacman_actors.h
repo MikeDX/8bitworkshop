@@ -7,6 +7,7 @@ void actors_reset_level(void);
 void pac_update(void);
 void ghosts_update(void);
 void actors_draw(void);
+void actors_draw_anim(byte animate);
 byte check_ghost_hits(void); /* 1 = pac died */
 void release_ghosts(void);
 

@@ -15,7 +15,7 @@
  */
 
 void pac_sound_engine(void);
-/* NMI secondary entry (ROM 0x2D0C); label inside pac_sound_engine. */
+/* Sound secondary entry (ROM 0x2D0C); label inside pac_sound_engine. */
 void pac_sound_effects(void);
 
 extern const byte pac_sound_tables[];
