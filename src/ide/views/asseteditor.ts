@@ -198,6 +198,10 @@ export class AssetEditorView implements ProjectView, pixed.EditorContext {
         try {
           var jsontxt = m[1].replace(/([A-Za-z]+):/g, '"$1":'); // fix lenient JSON
           var json = JSON.parse(jsontxt);
+          // Display-only metadata (e.g. rotate:90) — not an editable pixel/sfx asset
+          if (json.rotate != null && json.w == null && json.h == null && !json.pal && !json.sfx) {
+            continue;
+          }
           // TODO: name?
           result.push({ fileid: id, header: header, startline: startline, endline: endline, fmt: json, start: start, end: end });
         } catch (e) {

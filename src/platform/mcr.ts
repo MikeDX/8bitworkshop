@@ -11,6 +11,8 @@ const MCR2_PRESETS = [
     { id: 'minimal.c', name: 'Minimal Example' },
     { id: 'gfxtest.c', name: 'Graphics Test' },
     { id: 'chase.c', name: 'Chase' },
+    { id: 'solarian.c', name: 'Solarian (Horizontal)' },
+    { id: 'solarian_v.c', name: 'Solarian (Vertical)' },
 ];
 
 class MCR2Platform extends BaseZ80MachinePlatform<MCR2Machine> implements Platform {
