@@ -382,8 +382,11 @@ export var PLATFORM_PARAMS = {
     },
     'mcr': {
       arch: 'z80',
-      code_start: 0x0,
-      // Homebrew blob: code + BG@0x8000 + SPR@0xA000 (see machine/mcr.ts)
+      // Blob image starts at 0 (ABS reset @0x0000, IM2 table @0x7F00, gfx @0x8000/0xA000)
+      rom_start: 0x0000,
+      code_start: 0x0000,
+      // _CODE area starts after ISR stub (see chase.c start/mcr_vblank_isr)
+      codeseg_start: 0x100,
       rom_size: 0xc000,
       data_start: 0xe000,
       data_size: 0x800,

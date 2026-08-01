@@ -1,13 +1,15 @@
-// based on https://raw.githubusercontent.com/mamedev/mame/refs/heads/master/src/mame/midway/mcr.cpp
+// based on https://raw.githubusercontent.com/mamedev/mame/master/src/mame/bally/mcr.cpp
 // license:BSD-3-Clause
 // copyright-holders:Aaron Giles
+//
+// Aligned with MAME 91490 / `timber`: no BG scroll, active-low SSIO,
+// MAME mcr_bg_layout + mcr_sprite_layout gfx packing in the download blob.
 
 import { Z80, Z80State } from "../common/cpu/ZilogZ80";
 import { BasicScanlineMachine } from "../common/devices";
 import { KeyFlags, newAddressDecoder, padBytes, Keys, makeKeycodeMap, newKeyboardHandler, EmuHalt } from "../common/emu";
 import { MasterAudio, AY38910_Audio, TssChannelAdapter } from "../common/audio";
 
-// MCR-II constants (91490 CPU board)
 const MCR2_XTAL = 19968000;
 const MCR2_CPU_FREQ = MCR2_XTAL / 4; // ~4.992 MHz
 const MCR2_NUM_VISIBLE_SCANLINES = 480;
@@ -18,7 +20,7 @@ const MCR2_CYCLES_PER_LINE = Math.floor(MCR2_CPU_FREQ / (MCR2_NUM_TOTAL_SCANLINE
 
 const MCR2_TILE_COLS = 32;
 const MCR2_TILE_ROWS = 30;
-const MCR2_TILE_SIZE = 8; // double-pixels for BG
+const MCR2_TILE_SIZE = 8; // logical pixels before ×2 display
 
 const INITIAL_WATCHDOG = 16;
 
@@ -27,30 +29,34 @@ function pal3bit(v: number): number {
     return (v << 5) | (v << 2) | (v >> 1);
 }
 
+/* timber IP bit order; negative mask = active low */
 const MCR2_KEYCODE_MAP = makeKeycodeMap([
-    [Keys.SELECT, 0, 0x1],    // Coin 1
-    [Keys.START, 0, 0x4],     // 1P Start
-    [Keys.VK_2, 0, 0x8],      // 2P Start
-    [Keys.UP, 1, 0x1],        // P1 Up
-    [Keys.DOWN, 1, 0x2],      // P1 Down
-    [Keys.LEFT, 1, 0x4],      // P1 Left
-    [Keys.RIGHT, 1, 0x8],     // P1 Right
-    [Keys.A, 1, 0x10],        // P1 Button 1
-    [Keys.B, 1, 0x20],        // P1 Button 2
-    [Keys.P2_UP, 2, 0x1],     // P2 Up
-    [Keys.P2_DOWN, 2, 0x2],   // P2 Down
-    [Keys.P2_LEFT, 2, 0x4],   // P2 Left
-    [Keys.P2_RIGHT, 2, 0x8],  // P2 Right
-    [Keys.P2_A, 2, 0x10],     // P2 Button 1
-    [Keys.P2_B, 2, 0x20],     // P2 Button 2
+    [Keys.SELECT, 0, -0x1],   // Coin 1
+    [Keys.VK_5, 0, -0x1],     // Coin 1 (alt)
+    [Keys.START, 0, -0x4],    // 1P Start
+    [Keys.VK_1, 0, -0x4],     // 1P Start (alt)
+    [Keys.VK_2, 0, -0x8],     // 2P Start
+    [Keys.RIGHT, 1, -0x1],    // P1 Right
+    [Keys.LEFT, 1, -0x2],     // P1 Left
+    [Keys.DOWN, 1, -0x4],     // P1 Down
+    [Keys.UP, 1, -0x8],       // P1 Up
+    [Keys.A, 1, -0x10],       // P1 Button 1 (Space)
+    [Keys.GP_A, 1, -0x10],    // P1 Button 1 (X)
+    [Keys.B, 1, -0x20],       // P1 Button 2
+    [Keys.GP_B, 1, -0x20],    // P1 Button 2 (Z)
+    [Keys.P2_RIGHT, 2, -0x1],
+    [Keys.P2_LEFT, 2, -0x2],
+    [Keys.P2_DOWN, 2, -0x4],
+    [Keys.P2_UP, 2, -0x8],
+    [Keys.P2_A, 2, -0x10],
+    [Keys.P2_B, 2, -0x20],
 ]);
 
 /*
- * Homebrew ROM blob layout (fits SDCC IHX; keeps 0xE000+ free for RAM):
+ * Download blob (converter splits into timber ROM files):
  *   0x0000-0x7FFF  program
- *   0x8000-0x9FFF  background tiles (2 planes × 4KB) — tile*8, up to 512 codes
- *   0xA000-0xBFFF  sprites (4 planes × 2KB) — 32×32, row-major, 16 codes
- *   0xC000-0xFFFF  unused in blob / CPU RAM from 0xE000
+ *   0x8000-0x9FFF  BG gfx1 window: low half + high half (mcr_bg_layout)
+ *   0xA000-0xBFFF  sprite gfx2 window: 4 quarters (mcr_sprite_layout)
  */
 const ROM_BG_GFX_START = 0x8000;
 const ROM_BG_GFX_SIZE = 0x2000;
@@ -69,25 +75,19 @@ export class MCR2Machine extends BasicScanlineMachine {
     sampleRate = MCR2_FPS * MCR2_NUM_TOTAL_SCANLINES * 2;
 
     cpu = new Z80();
-    ram = new Uint8Array(0x800);      // E000-E7FF (NVRAM)
-    sprram = new Uint8Array(0x200);   // E800-E9FF (sprite RAM)
-    vram = new Uint8Array(0x800);     // F000-F7FF (video RAM)
-    palram = new Uint8Array(0x80);    // F800-F87F (palette RAM)
+    ram = new Uint8Array(0x800);
+    sprram = new Uint8Array(0x200);
+    vram = new Uint8Array(0x800);
+    palram = new Uint8Array(0x80);
 
     palette = new Uint32Array(64);
 
     interruptEnabled = false;
     watchdog_counter = INITIAL_WATCHDOG;
     ctcVector = 0;
+    /** Bit N set → next write to CTC channel N is a time constant, not control */
+    ctcTimeConstFollows = 0;
     frameCount = 0;
-    /**
-     * Homebrew BG scroll (real MCR-2 has none). NES-style: top-left of the screen
-     * samples nametable at (scrollX, scrollY). Values are NES/logical pixels
-     * (32×30 tile grid); rendering scales ×2 onto the 512×480 canvas.
-     * scrollX is treated as signed 8-bit (e.g. 248 = -8).
-     */
-    scrollX = 0;
-    scrollY = 0;
 
     audioadapter: TssChannelAdapter;
     psg1: AY38910_Audio;
@@ -104,11 +104,11 @@ export class MCR2Machine extends BasicScanlineMachine {
 
         this.connectCPUMemoryBus(this);
         this.connectCPUIOBus(this.newIOBus());
-        this.inputs.set([0, 0, 0, 0xff, 0xff]); // inputs + DIP switches
+        // Active-low inputs: 0xFF = none pressed
+        this.inputs.set([0xff, 0xff, 0xff, 0xff, 0xff]);
         this.handler = newKeyboardHandler(this.inputs, MCR2_KEYCODE_MAP);
     }
 
-    // Main CPU memory read
     read = newAddressDecoder([
         [0x0000, 0xDFFF, 0xFFFF, (a) => { return this.rom ? this.rom[a] : 0; }],
         [0xE000, 0xE7FF, 0x7FF, (a) => { return this.ram[a]; }],
@@ -121,38 +121,37 @@ export class MCR2Machine extends BasicScanlineMachine {
         return this.read(a);
     }
 
-    // Main CPU memory write
     write = newAddressDecoder([
         [0xE000, 0xE7FF, 0x7FF, (a, v) => { this.ram[a] = v; }],
         [0xE800, 0xEFFF, 0x1FF, (a, v) => { this.sprram[a] = v; }],
         [0xF000, 0xF7FF, 0x7FF, (a, v) => { this.vram[a] = v; }],
         [0xF800, 0xFFFF, 0x7F, (a, v) => {
             this.palram[a] = v;
-            this.updatePalette(a);
+            // MAME mcr_paletteram9_w: 9-bit color from data | (A0<<8)
+            let i = a >> 1;
+            if (i >= 64) return;
+            let value = v | ((a & 1) << 8);
+            let r = pal3bit(value >> 6);
+            let g = pal3bit(value >> 0);
+            let b = pal3bit(value >> 3);
+            this.palette[i] = 0xFF000000 | (b << 16) | (g << 8) | r;
         }],
     ]);
 
-    // I/O bus
     newIOBus() {
         return {
             read: (addr: number) => {
                 addr &= 0xFF;
-                if (addr <= 0x04) {
-                    return this.inputs[addr]; // SSIO input ports
-                }
-                if (addr >= 0x08 && addr <= 0x0F) {
-                    return this.inputs[3]; // DIP switches
+                // SSIO IP0-IP4 (mirrored every 0x08 in low nibble group)
+                let ip = addr & 0x07;
+                if (ip <= 0x04) {
+                    return this.inputs[ip];
                 }
                 if (addr >= 0xF0 && addr <= 0xF3) {
-                    return 0; // CTC read
+                    return 0;
                 }
-                // Homebrew: frame counter for vsync wait (increments each advanceFrame)
-                if (addr == 0xF4) {
-                    return this.frameCount & 0xff;
-                }
-                if (addr == 0xF5) return this.scrollY & 0xff;
-                if (addr == 0xF6) return this.scrollX & 0xff;
-                return 0;
+                // Unpulled SSIO bits read high (active-low idle)
+                return 0xff;
             },
             write: (addr: number, val: number) => {
                 addr &= 0xFF;
@@ -160,131 +159,118 @@ export class MCR2Machine extends BasicScanlineMachine {
                     this.watchdog_counter = INITIAL_WATCHDOG;
                 }
                 if (addr >= 0xF0 && addr <= 0xF3) {
-                    // Z80 CTC write — track IM2 vector; bit7 of control enables IRQ
-                    if ((val & 1) == 0) {
-                        this.ctcVector = val & 0xF8;
-                    } else if (val & 0x80) {
-                        this.interruptEnabled = true;
-                    } else if ((val & 0xc0) == 0x00) {
-                        this.interruptEnabled = false;
+                    // Z80 CTC: after a control word with "time constant follows"
+                    // (bit 2), the next write to that channel is the down-count
+                    // value — not another control word.
+                    let ch = addr - 0xF0;
+                    let chMask = 1 << ch;
+                    if (this.ctcTimeConstFollows & chMask) {
+                        this.ctcTimeConstFollows &= ~chMask;
+                        return;
                     }
-                }
-                // Homebrew BG scroll (NES-style logical pixels). Real 91490 has none.
-                if (addr == 0xF5) this.scrollY = val;
-                if (addr == 0xF6) this.scrollX = val;
-                // SSIO sound output (ports 0x00-0x07)
-                if (addr >= 0x00 && addr <= 0x07) {
-                    // Sound commands - ignored for now
+                    if ((val & 1) == 0) {
+                        // Bit0=0: interrupt vector (written to CH0)
+                        this.ctcVector = val & 0xF8;
+                    } else {
+                        // Bit0=1: control word
+                        if (val & 0x04) this.ctcTimeConstFollows |= chMask;
+                        if (val & 0x80) this.interruptEnabled = true;
+                        else this.interruptEnabled = false;
+                    }
                 }
             }
         };
     }
 
-    // Palette: MCR 9-bit format
-    // From MAME: R = ((offset&1)<<2) | (pal>>6), G = pal&7, B = (pal>>3)&7
-    // Each color entry = 2 bytes; only odd byte carries color data
     updatePalette(offset: number) {
+        // Re-apply as if the higher-priority byte was written last (see set_color).
         let i = offset >> 1;
         if (i >= 64) return;
-        let pal = this.palram[i * 2 + 1]; // odd byte has color data
-        let r = pal3bit((pal >> 6) & 3);        // R low 2 bits from pal[7:6]
-        let g = pal3bit(pal & 7);                // G from pal[2:0]
-        let b = pal3bit((pal >> 3) & 7);         // B from pal[5:3]
-        // R MSB comes from even byte bit 0
-        let r_msb = (this.palram[i * 2] & 1) << 2;
-        r = pal3bit(r_msb | ((pal >> 6) & 3));
+        let even = this.palram[i * 2];
+        let odd = this.palram[i * 2 + 1];
+        let value: number;
+        if (odd != 0) value = odd | 0x100;
+        else value = even;
+        let r = pal3bit(value >> 6);
+        let g = pal3bit(value >> 0);
+        let b = pal3bit(value >> 3);
         this.palette[i] = 0xFF000000 | (b << 16) | (g << 8) | r;
     }
 
-    // Draw one scanline
     drawScanline() {
         let sl = this.scanline;
         if (sl >= MCR2_NUM_VISIBLE_SCANLINES) return;
 
         let pixofs = sl * MCR2_CANVAS_WIDTH;
 
-        // BG is stored at half vertical res and doubled (even+odd lines via drawTileLine).
-        // Do NOT reuse the halved Y for sprites — that caused interlaced ghosts.
-        // NES-style scroll: top of screen shows nametable at scrollY (logical px, ×2 to canvas).
-        // Positive scrollY → title sits above the viewport and falls in as scrollY → 0.
+        // BG at half vertical res, doubled via drawTileLine (even+odd).
         if ((sl & 1) == 0) {
-            let srcSl = sl + (this.scrollY & 0xff) * 2;
-            if (srcSl >= 0 && srcSl < MCR2_NUM_VISIBLE_SCANLINES) {
-                let half = srcSl >> 1;
-                let tileRow = Math.floor(half / MCR2_TILE_SIZE);
-                let tileY = half % MCR2_TILE_SIZE;
-                // signed scrollX in NES pixels → canvas; matches neslib scroll(x,y)
-                let sx = (this.scrollX << 24) >> 24;
-                let originX = sx * 2;
-                let tileW = MCR2_TILE_SIZE * 2;
-                let scrollTilesX = Math.floor(originX / tileW);
-                let scrollPixX = ((originX % tileW) + tileW) % tileW;
+            let half = sl >> 1;
+            let tileRow = Math.floor(half / MCR2_TILE_SIZE);
+            let tileY = half % MCR2_TILE_SIZE;
 
-                if (tileRow < MCR2_TILE_ROWS) {
-                    // +1 column so fine scroll can pull in a partial tile at the edges
-                    for (let tileCol = 0; tileCol <= MCR2_TILE_COLS; tileCol++) {
-                        let srcCol = (tileCol + scrollTilesX) & 31;
-                        let vramOfs = (tileRow * MCR2_TILE_COLS + srcCol) * 2;
-                        let byte0 = this.vram[vramOfs];
-                        let byte1 = this.vram[vramOfs + 1];
+            if (tileRow < MCR2_TILE_ROWS) {
+                for (let tileCol = 0; tileCol < MCR2_TILE_COLS; tileCol++) {
+                    let vramOfs = (tileRow * MCR2_TILE_COLS + tileCol) * 2;
+                    let byte0 = this.vram[vramOfs];
+                    let byte1 = this.vram[vramOfs + 1];
 
-                        let tileCode = byte0 | ((byte1 & 0x03) << 8);
-                        let tilePalette = (byte1 >> 4) & 0x03;
-                        let flipX = (byte1 & 0x04) != 0;
-                        let flipY = (byte1 & 0x08) != 0;
+                    let tileCode = byte0 | ((byte1 & 0x03) << 8);
+                    let tilePalette = (byte1 >> 4) & 0x03;
+                    let flipX = (byte1 & 0x04) != 0;
+                    let flipY = (byte1 & 0x08) != 0;
 
-                        let ty = flipY ? (15 - tileY) : tileY;
-                        let pixX = tileCol * tileW - scrollPixX;
-                        if (pixX <= -16 || pixX >= MCR2_CANVAS_WIDTH) continue;
-                        this.drawTileLine(pixofs + pixX, tileCode, ty, tilePalette, flipX);
-                    }
+                    let ty = flipY ? (15 - tileY) : tileY;
+                    let pixX = tileCol * MCR2_TILE_SIZE * 2;
+                    this.drawTileLine(pixofs + pixX, tileCode, ty, tilePalette, flipX);
                 }
-            } else {
-                // Off-nametable (title scroll-in) — clear this line pair
-                this.pixels.fill(this.palette[0] || 0xFF000000, pixofs, pixofs + MCR2_CANVAS_WIDTH * 2);
             }
         }
 
         this.drawSpriteScanline(sl, pixofs);
     }
 
-    // Render one row of a 16×16 background tile (2 bitplanes)
+    /** Decode one row of an 8×8 tile from MAME mcr_bg_layout (displayed ×2). */
     drawTileLine(outOfs: number, tileCode: number, row: number, palette: number, flipX: boolean) {
         let gfxBase = ROM_BG_GFX_START;
-        let halfSize = ROM_BG_GFX_SIZE / 2; // 8KB per bitplane
+        let halfSize = ROM_BG_GFX_SIZE / 2; // 0x1000
+        // Low half @ +0 → pens 0-3 (timber); high @ +halfSize → pens 4-15
+        let tileOfs = tileCode * 16;
+        let rowBits = (row & 7) * 16;
 
-        // Tile layout: 8 bytes per tile per bitplane (tight pack)
-        let tileOfs = tileCode * 8;
-        let byteOfs = tileOfs + (row & 7);
-
-        let p0L = this.rom[gfxBase + byteOfs] || 0;
-        let p1L = this.rom[gfxBase + halfSize + byteOfs] || 0;
-
-        let colorBase = palette * 4;
+        let colorBase = palette * 16; // MAME 4bpp: 16 pens per tile palette bank
 
         for (let x = 0; x < 8; x++) {
-            let bit = 7 - x;
+            // mcr_bg_layout: STEP8(0,2); MAME digfx bit0 = MSB of byte
+            let bit0 = rowBits + x * 2;
+            let color = 0;
+            // pens 0,1 from low half (timbg1)
+            for (let p = 0; p < 2; p++) {
+                let b = bit0 + p;
+                let byte = this.rom[gfxBase + tileOfs + (b >> 3)] || 0;
+                if (byte & (0x80 >> (b & 7))) color |= 1 << p;
+            }
+            // pens 2,3 from high half (timbg0)
+            for (let p = 0; p < 2; p++) {
+                let b = bit0 + p;
+                let byte = this.rom[gfxBase + halfSize + tileOfs + (b >> 3)] || 0;
+                if (byte & (0x80 >> (b & 7))) color |= 1 << (p + 2);
+            }
+
             let srcX = flipX ? (14 - x * 2) : x * 2;
-            let color = ((p0L >> bit) & 1) | (((p1L >> bit) & 1) << 1);
             let px = outOfs + srcX;
-            // outOfs may be mid-line with fine scrollX; clip to this scanline pair
-            let lineBase = outOfs - (outOfs % MCR2_CANVAS_WIDTH);
-            let xpix = px - lineBase;
-            if (xpix < 0 || xpix + 1 >= MCR2_CANVAS_WIDTH) continue;
             let c = this.palette[colorBase + color];
             this.pixels[px] = this.pixels[px + 512] = this.pixels[px + 1] = this.pixels[px + 513] = c;
         }
     }
 
-    // Render sprites intersecting a given scanline (91464 sprite board, 4bpp)
+    /** Decode sprite scanline from MAME mcr_sprite_layout (4 quarters). */
     drawSpriteScanline(scanline: number, pixofs: number) {
         let gfxBase = ROM_SPR_GFX_START;
-        let planeSize = ROM_SPR_GFX_SIZE / 4; // 8KB per bitplane
+        let quarterSize = ROM_SPR_GFX_SIZE / 4; // 0x800
 
-        // Iterate sprites back-to-front (last sprite = highest priority)
         for (let sprNum = 31; sprNum >= 0; sprNum--) {
             let base = sprNum * 4;
-            // MAME 91464: low-res sprite coords, then *2 to match 512×480 / 16×16 tiles
             let sy = ((241 - this.sprram[base]) * 2) & 0x1FF;
             let attrib = this.sprram[base + 1];
             let code = this.sprram[base + 2] | ((attrib & 0x08) ? 0x100 : 0);
@@ -292,44 +278,33 @@ export class MCR2Machine extends BasicScanlineMachine {
 
             let flipX = (attrib & 0x10) != 0;
             let flipY = (attrib & 0x20) != 0;
+            // MAME 91464: ((~attrib & 3) << 4) & 0x30
             let sprPalette = (attrib & 0x03);
-            let colorBase = 16 + sprPalette * 4; // 4 sprite pals × 4 pens (NES-style)
+            let colorBase = ((~sprPalette & 3) << 4) & 0x30;
 
-            // Check scanline intersection with 32-pixel tall sprite
             let relY = scanline - sy;
             if (relY < 0 || relY >= 32) continue;
 
             let row = flipY ? (31 - relY) : relY;
+            let sprBase = code * 128; // bytes per sprite per quarter
 
-            // Sprite GFX: 4 planes × 2KB; each sprite 128 bytes/plane, row-major
-            // (4 bytes per row × 32 rows) — matches asset editor + gen_mcr_chase_gfx.py
-            let sprOfs = code * 128 + row * 4;
+            for (let x = 0; x < 32; x++) {
+                let x_group = x >> 1;
+                let frac = x_group & 3;
+                let pair = x_group >> 2;
+                let bit_base = row * 32 + pair * 8 + ((x & 1) << 2);
+                let color = 0;
+                let qbase = gfxBase + frac * quarterSize + sprBase;
+                for (let p = 0; p < 4; p++) {
+                    let b = bit_base + p;
+                    let byte = this.rom[qbase + (b >> 3)] || 0;
+                    if (byte & (0x80 >> (b & 7))) color |= 1 << p;
+                }
+                if (color == 0) continue;
 
-            for (let col = 0; col < 4; col++) {
-                let byteOfs = sprOfs + col;
-                let p0 = this.rom[gfxBase + byteOfs] || 0;
-                let p1 = this.rom[gfxBase + planeSize + byteOfs] || 0;
-                let p2 = this.rom[gfxBase + planeSize * 2 + byteOfs] || 0;
-                let p3 = this.rom[gfxBase + planeSize * 3 + byteOfs] || 0;
-
-                for (let x = 0; x < 8; x++) {
-                    let bit = 7 - x;
-                    let color = ((p0 >> bit) & 1) |
-                                (((p1 >> bit) & 1) << 1) |
-                                (((p2 >> bit) & 1) << 2) |
-                                (((p3 >> bit) & 1) << 3);
-                    if (color == 0) continue; // transparent
-
-                    let px: number;
-                    if (flipX) {
-                        px = sx + 31 - (col * 8 + x);
-                    } else {
-                        px = sx + col * 8 + x;
-                    }
-
-                    if (px >= 0 && px < MCR2_CANVAS_WIDTH) {
-                        this.pixels[pixofs + px] = this.palette[colorBase + color];
-                    }
+                let px = flipX ? (sx + 31 - x) : (sx + x);
+                if (px >= 0 && px < MCR2_CANVAS_WIDTH) {
+                    this.pixels[pixofs + px] = this.palette[colorBase + color];
                 }
             }
         }
@@ -344,14 +319,13 @@ export class MCR2Machine extends BasicScanlineMachine {
 
         this.frameCount = (this.frameCount + 1) & 0xff;
 
-        // Watchdog
         if (this.watchdog_counter-- <= 0) {
             throw new EmuHalt("WATCHDOG FIRED");
         }
 
-        // VBlank IRQ via CTC channel 0 (only once the game enables it)
+        // VBlank IRQ (CTC CH3 on real hw). IM2 vector = (base & 0xF8) | (ch << 1).
         if (this.interruptEnabled) {
-            this.cpu.interrupt(this.ctcVector);
+            this.cpu.interrupt((this.ctcVector & 0xF8) | (3 << 1));
         }
 
         return steps;
@@ -362,14 +336,15 @@ export class MCR2Machine extends BasicScanlineMachine {
         this.watchdog_counter = INITIAL_WATCHDOG;
         this.interruptEnabled = false;
         this.ctcVector = 0;
+        this.ctcTimeConstFollows = 0;
         this.frameCount = 0;
+        this.inputs.set([0xff, 0xff, 0xff, 0xff, 0xff]);
         this.psg1.reset();
         this.psg2.reset();
     }
 
     loadROM(data) {
         this.rom = padBytes(data, this.defaultROMSize);
-        // Rebuild palette
         for (let i = 0; i < 64; i++) {
             this.updatePalette(i * 2);
         }

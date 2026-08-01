@@ -17,7 +17,7 @@ class MCR2Platform extends BaseZ80MachinePlatform<MCR2Machine> implements Platfo
 
     newMachine()          { return new MCR2Machine(); }
     getPresets()          { return MCR2_PRESETS; }
-    getPlatformName()     { return "Midway MCR-2"; }
+    getPlatformName()     { return "Midway MCR (91490 / timber)"; }
     readAddress(a)        { return this.machine.readConst(a); }
     readVRAMAddress(a)    {
         if (a < 0x200) return this.machine.sprram[a];

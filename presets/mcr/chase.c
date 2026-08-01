@@ -13,13 +13,56 @@
 #include "chase_gfx.h"
 
 void main(void);
+void mcr_boot(void);
 
-/* Must be first code symbol so it lands at 0x0000. */
-void start(void) {
+volatile byte mcr_vblank_flag;
+
+/* Naked ISR for CTC (IM2). Must preserve all regs — can fire anytime. */
+void mcr_vblank_isr(void) __naked {
 __asm
-  LD   SP, #0xE800
-  DI
+  push af
+  push bc
+  push de
+  push hl
+  push ix
+  push iy
+  xor  a
+  inc  a
+  ld   (_mcr_vblank_flag), a
+  pop  iy
+  pop  ix
+  pop  hl
+  pop  de
+  pop  bc
+  pop  af
+  ei
+  reti
 __endasm;
+}
+
+/*
+ * Absolute header: reset @0, IM2 vector table @0x1F00.
+ * .area _CODE restored so subsequent C lands in the program bank.
+ */
+void start(void) __naked {
+__asm
+  .area _HEADER (ABS)
+  .org 0x0000
+  ld   sp, #0xE800
+  di
+  jp   _mcr_boot
+  /* IM2 table: CTC vectors are (base&0xF8)|(ch<<1) — fill CH0..CH3 */
+  .org 0x7F00
+  .dw  _mcr_vblank_isr
+  .dw  _mcr_vblank_isr
+  .dw  _mcr_vblank_isr
+  .dw  _mcr_vblank_isr
+  .area _CODE
+__endasm;
+}
+
+void mcr_boot(void) {
+  mcr_enable_vblank_irq();
   main();
 }
 
@@ -221,16 +264,22 @@ void blit_nametable(const byte* nt, const byte* attr) {
 }
 
 void apply_bg_rgb(const byte* rgb48) {
-  byte i;
-  for (i = 0; i < 16; i++)
-    set_color(i, rgb48[i * 3], rgb48[i * 3 + 1], rgb48[i * 3 + 2]);
+  /* MAME 4bpp: 4 banks × 16 pens. NES supplies 4×4 — map into pens 0-3 of each bank. */
+  byte pal, pen;
+  for (pal = 0; pal < 4; pal++) {
+    for (pen = 0; pen < 4; pen++) {
+      byte i = (byte)(pal * 4 + pen);
+      set_color((byte)(pal * 16 + pen), rgb48[i * 3], rgb48[i * 3 + 1], rgb48[i * 3 + 2]);
+    }
+  }
 }
 
 void apply_spr_rgb(void) {
   byte i;
-  /* 4 sprite pals × 4 pens at colors 16..31 (matches mcr.ts colorBase) */
+  /* 91464: color = ((~attrib & 3) << 4) & 0x30 → pal0=48, pal1=32, pal2/3=0 */
+  static const byte spr_base[4] = { 48, 32, 0, 0 };
   for (i = 0; i < 4; i++) {
-    byte base = (byte)(16 + i * 4);
+    byte base = spr_base[i];
     const byte* p = &chase_pal_spr_rgb[i * 12];
     set_color(base,     p[0], p[1], p[2]);
     set_color(base + 1, p[3], p[4], p[5]);
@@ -338,8 +387,6 @@ void load_level(byte li) {
   items_collected = 0;
   game_level = li;
   setup_level_palette();
-  SCROLL_X = 0;
-  SCROLL_Y = 0;
   clrscr();
   for (y = 0; y < MAP_H; y++) {
     row = levels[li][y];
@@ -532,43 +579,24 @@ void patch_large_digit(byte digit /*1-5*/, byte col, byte row) {
 
 void title_screen(void) {
   byte blink = 0;
-  int iy, dy;
   byte wait;
 
   hide_all_sprites();
-  /* NES scroll(-8,y): signed X in logical pixels (emu ×2). Shifts title right half a tile. */
-  SCROLL_X = (byte)(-8);
-  SCROLL_Y = 240;
   apply_bg_rgb(chase_pal_title_rgb);
   apply_spr_rgb();
   blit_nametable(chase_title_nt, chase_title_attr);
 
-  /*
-   * Real MCR-2 has no BG scroll — SCROLL_Y/X are homebrew in 8bw.
-   * Physics matches NES title_screen(): fall in from above with bounce + gravity.
-   * Fixed-point (FP_BITS) so gravity dy-=2 stays gentle like the NES port.
-   */
-  iy = 240 << FP_BITS;
-  dy = -8 << FP_BITS;
+  /* Real 91490 has no BG scroll — static title + blinking PRESS START. */
   wait = 160;
   frame_cnt = 0;
+  /* Drain any stuck press, then wait for a new press+release. */
   read_controls();
-  fire_prev = 1;
+  while (joy_fire) { wait_frame(); read_controls(); }
 
   while (1) {
     wait_frame();
-    SCROLL_Y = (byte)(iy >> FP_BITS);
-
     read_controls();
-    if (joy_fire && !fire_prev) break;
-    fire_prev = joy_fire;
-
-    iy += dy;
-    if (iy < 0) {
-      iy = 0;
-      dy = -dy >> 1;
-    }
-    if (dy > (-8 << FP_BITS)) dy -= 2;
+    if (joy_fire) break;
 
     if (wait) {
       --wait;
@@ -578,20 +606,15 @@ void title_screen(void) {
       frame_cnt++;
     }
   }
-
-  SCROLL_Y = 0;
   while (joy_fire) { wait_frame(); read_controls(); }
   for (blink = 0; blink < 16; blink++) {
     wait_frame();
     set_color(2, (blink & 1) ? 7 : 0, (blink & 1) ? 7 : 0, (blink & 1) ? 7 : 0);
   }
-  SCROLL_X = 0;
 }
 
 void show_level_banner(void) {
   hide_all_sprites();
-  SCROLL_X = (byte)(-4); /* NES scroll(-4,0) half-tile nudge */
-  SCROLL_Y = 0;
   apply_bg_rgb(chase_pal_game_rgb[game_level]);
   blit_nametable(chase_level_scr_nt, chase_level_scr_attr);
   /* Letters = pen 2, digits = pen 3 — both bright white like NES pal_col(2/3)=$30 */
@@ -599,7 +622,6 @@ void show_level_banner(void) {
   set_color(3, 7, 7, 7);
   patch_large_digit((byte)(game_level + 1), 20, 12);
   wait_frames(50);
-  SCROLL_X = 0;
 }
 
 void show_game_over(void) {
@@ -608,7 +630,7 @@ void show_game_over(void) {
   blit_nametable(chase_gameover_nt, chase_gameover_attr);
   set_color(3, 7, 7, 7);
   read_controls();
-  fire_prev = 1;
+  while (joy_fire) { wait_frame(); read_controls(); }
   frame_cnt = 0;
   while (1) {
     wait_frame();
@@ -617,8 +639,7 @@ void show_game_over(void) {
     if (frame_cnt & 2) set_color(2, 6, 3, 5);
     else set_color(2, 5, 1, 4);
     read_controls();
-    if (joy_fire && !fire_prev) break;
-    fire_prev = joy_fire;
+    if (joy_fire) break;
   }
   while (joy_fire) { wait_frame(); read_controls(); }
 }
@@ -629,7 +650,7 @@ void show_well_done(void) {
   blit_nametable(chase_welldone_nt, chase_welldone_attr);
   set_color(3, 7, 7, 7);
   read_controls();
-  fire_prev = 1;
+  while (joy_fire) { wait_frame(); read_controls(); }
   frame_cnt = 0;
   while (1) {
     wait_frame();
@@ -638,8 +659,9 @@ void show_well_done(void) {
     if (frame_cnt & 2) set_color(2, 2, 4, 7);
     else set_color(2, 0, 3, 6);
     read_controls();
-    if (joy_fire && !fire_prev) break;
-    fire_prev = joy_fire;
+    if (joy_fire) break;
+  }
+  while (joy_fire) { wait_frame(); read_controls(); }
   }
   while (joy_fire) { wait_frame(); read_controls(); }
 }
