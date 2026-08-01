@@ -303,6 +303,18 @@ export function convertPaletteBytes(arr: UintArray, r0, r1, g0, g1, b0, b1): num
   return result;
 }
 
+/**
+ * Namco color PROM byte → RGBA (Pac-Man / Pengo resistor weights).
+ * Must match src/machine/pengo.ts PengoVideo.rebuild().
+ * Encoding: RRR (bits 0-2), GGG (3-5), BB (6-7).
+ */
+export function decodePacmanColorPromByte(d: number): number {
+  var r = ((d >> 0) & 1) * 0x21 + ((d >> 1) & 1) * 0x47 + ((d >> 2) & 1) * 0x97;
+  var g = ((d >> 3) & 1) * 0x21 + ((d >> 4) & 1) * 0x47 + ((d >> 5) & 1) * 0x97;
+  var b = ((d >> 6) & 1) * 0x51 + ((d >> 7) & 1) * 0xae;
+  return 0xff000000 | (b << 16) | (g << 8) | r;
+}
+
 export function getPaletteLength(palfmt: PixelEditorPaletteFormat): number {
   var pal = palfmt.pal;
   if (typeof pal === 'number') {
@@ -310,6 +322,8 @@ export function getPaletteLength(palfmt: PixelEditorPaletteFormat): number {
     var gg = Math.floor(Math.abs(pal / 10) % 10);
     var bb = Math.floor(Math.abs(pal) % 10);
     return 1 << (rr + gg + bb);
+  } else if (pal === 'pengo') {
+    return 256; // every PROM encoding byte → a color
   } else {
     var paltable = PREDEF_PALETTES[pal];
     if (paltable) {
@@ -332,6 +346,10 @@ export function convertPaletteFormat(palbytes: UintArray, palfmt: PixelEditorPal
       newpalette = convertPaletteBytes(palbytes, 0, rr, rr, gg, rr + gg, bb);
     else
       newpalette = convertPaletteBytes(palbytes, rr + gg, bb, rr, gg, 0, rr);
+  } else if (pal === 'pengo') {
+    newpalette = [];
+    for (var i = 0; i < palbytes.length; i++)
+      newpalette.push(decodePacmanColorPromByte(palbytes[i]));
   } else {
     var paltable = PREDEF_PALETTES[pal];
     if (paltable) {
@@ -397,7 +415,23 @@ var PREDEF_LAYOUTS: { [id: string]: PixelEditorPaletteLayout } = {
     ['Left', 0x00, -4],
     ['Right', 0x04, -4]
   ],
+  // Pengo: 1024-byte lookup = 256×4 pens. Pen 0 is transparent; editor stores
+  // shared transparent at [0], then 3 opaque PROM bytes per palette.
+  // Tile editor matchlen=4 prepends palette[0] (see getPalettes).
+  // Built below after PREDEF_LAYOUTS init.
+  'pengo': [] as PixelEditorPaletteLayout,
 };
+
+// Fill Pengo layout: Transparent + Pal 00..255
+(function buildPengoLayout() {
+  const layout: PixelEditorPaletteLayout = [['Transparent', 0, 1]];
+  for (let i = 0; i < 256; i++) {
+    const n = i < 10 ? '0' + i : '' + i;
+    layout.push(['Pal ' + n, 1 + i * 3, 3]);
+  }
+  PREDEF_LAYOUTS['pengo'] = layout;
+})();
+
 
 /////
 
@@ -690,7 +724,11 @@ export class PaletteFormatToRGB extends PixNode {
   updateRight() {
     if (equalArrays(this.words, this.left.words)) return false;
     this.words = this.left.words;
-    this.palette = dedupPalette(convertPaletteFormat(this.words, this.palfmt));
+    var cols = convertPaletteFormat(this.words, this.palfmt);
+    // Keep exact PROM colors for Pengo (and any layout slices). Dedup is only
+    // for flat palette grids where identical swatches need unique edit identities.
+    this.palette = (this.palfmt.layout || this.palfmt.pal === 'pengo')
+      ? new Uint32Array(cols) : dedupPalette(cols);
     this.layout = PREDEF_LAYOUTS[this.palfmt.layout];
     this.rgbimgs = [];
     this.palette.forEach((rgba: number) => {

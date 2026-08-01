@@ -4,10 +4,10 @@
  * Link helpers only:
  *   //#link "pengo_common.c"
  *
- * CRT0 (reset + IM2 VBLANK IRQ) lives in pengo_common — do not define start().
+ * CRT0 (reset + IM1 / RST 38h VBLANK IRQ) lives in pengo_common — do not define start().
  * Optional per-frame work: set pengo_vblank_hook, then pengo_irq_enable().
  *
- * Joystick bits differ from Pac-Man: UP, DOWN, LEFT, RIGHT (MAME pengo IN0).
+ * Sound: Namco WSG (not AY). Joystick bits differ from Pac-Man: UP,DOWN,LEFT,RIGHT.
  *
  * VRAM: same pacman_scan_rows map as Pac-Man (disjointed). See vram_addr().
  */
@@ -91,5 +91,20 @@ void hide_all_sprites(void);
 void sound_voice(byte voice, word freq, byte vol, byte wave);
 void sound_vol(byte voice, byte vol);
 void sound_off(void);
+
+/* ---- Pengo latch helpers (hardware) ---- */
+void set_gfx_bank(byte bank);       /* 0/1 — tiles+sprites */
+void set_palette_bank(byte bank);   /* 0/1 — color PROM high nibble */
+void set_colortable_bank(byte bank);
+void set_flip_screen(byte on);
+
+/*
+ * Software scroll (Pengo has no HW scroll; Jr Pac-Man bootleg uses 0x9030).
+ * Shifts the playfield only (y=2..33). dy>0 scrolls content down (new tiles
+ * enter from top). Uses linear column copies — cheap on this hardware.
+ */
+void scroll_playfield_y(sbyte dy, byte fill_tile, byte fill_pal);
+/* Shift one playfield column's tiles by dy (signed), fill vacated cells. */
+void scroll_column_y(byte x, sbyte dy, byte fill_tile, byte fill_pal);
 
 #endif
