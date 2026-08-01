@@ -409,7 +409,7 @@ export function getPaletteLength(palfmt: PixelEditorPaletteFormat): number {
     var gg = Math.floor(Math.abs(pal / 10) % 10);
     var bb = Math.floor(Math.abs(pal) % 10);
     return 1<<(rr+gg+bb);
-  } else if (pal === 'pacman') {
+  } else if (pal === 'pacman' || pal === 'pengo') {
     return 256; // every PROM encoding byte → a color
   } else {
     var paltable = PREDEF_PALETTES[pal];
@@ -433,7 +433,8 @@ export function convertPaletteFormat(palbytes: UintArray, palfmt: PixelEditorPal
       newpalette = convertPaletteBytes(palbytes, 0, rr, rr, gg, rr + gg, bb);
     else
       newpalette = convertPaletteBytes(palbytes, rr+gg, bb, rr, gg, 0, rr);
-  } else if (pal === 'pacman') {
+  } else if (pal === 'pacman' || pal === 'pengo') {
+    // Pengo uses the same Namco resistor-weighted color PROM encoding.
     newpalette = [];
     for (var i = 0; i < palbytes.length; i++)
       newpalette.push(decodePacmanColorPromByte(palbytes[i]));
@@ -515,7 +516,23 @@ var PREDEF_LAYOUTS: { [id: string]: PixelEditorPaletteLayout } = {
     ['Pal 14', 0x1c, 4],
     ['Pal 19', 0x20, 4],
   ],
+  // Pengo: 1024-byte lookup = 256×4 pens. Pen 0 is transparent; editor stores
+  // shared transparent at [0], then 3 opaque PROM bytes per palette.
+  // Tile editor matchlen=4 prepends palette[0] (see getPalettes).
+  // Built below after PREDEF_LAYOUTS init.
+  'pengo': [] as PixelEditorPaletteLayout,
 };
+
+// Fill Pengo layout: Transparent + Pal 00..255
+(function buildPengoLayout() {
+  const layout: PixelEditorPaletteLayout = [['Transparent', 0, 1]];
+  for (let i = 0; i < 256; i++) {
+    const n = i < 10 ? '0' + i : '' + i;
+    layout.push(['Pal ' + n, 1 + i * 3, 3]);
+  }
+  PREDEF_LAYOUTS['pengo'] = layout;
+})();
+
 
 /////
 
@@ -815,7 +832,7 @@ export class PaletteFormatToRGB extends PixNode {
     var cols = convertPaletteFormat(this.words, this.palfmt);
     // Keep exact PROM colors for Pac-Man (and any layout slices). Dedup is only
     // for flat palette grids where identical swatches need unique edit identities.
-    this.palette = (this.palfmt.layout || this.palfmt.pal === 'pacman')
+    this.palette = (this.palfmt.layout || this.palfmt.pal === 'pacman' || this.palfmt.pal === 'pengo')
       ? new Uint32Array(cols) : dedupPalette(cols);
     this.layout = PREDEF_LAYOUTS[this.palfmt.layout];
     this.rgbimgs = [];

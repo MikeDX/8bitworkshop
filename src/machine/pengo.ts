@@ -4,8 +4,13 @@ import { padBytes, Keys, makeKeycodeMap, newKeyboardHandler, EmuHalt } from "../
 
 /**
  * Pengo (Sega) — Pac-Man hardware family with remapped memory, 32KB program ROM,
- * dual gfx banks, and a larger color lookup PROM. Memory map matches MAME pengo.cpp
- * (non-encrypted / pengou).
+ * dual gfx banks, and a larger color lookup PROM. Memory map matches MAME
+ * pengo.cpp (set `pengo` = World rev A, not encrypted; machine config `pengou`).
+ *
+ * Sound is Namco 3-channel WSG (same as Pac-Man), NOT AY-3-891x.
+ *
+ * IRQ: arcade / MAME use IM1 (RST 38h). Pac-Man's I/O port-0 vector latch is
+ * removed on Pengo — do not rely on OUT (0) for the interrupt vector.
  *
  * Combined 8bitworkshop ROM layout:
  *   0x0000-0x7FFF  program (32KB)
@@ -212,6 +217,7 @@ export class PengoMachine extends BasicScanlineMachine {
     gfx: PengoVideo;
 
     interruptEnabled = 0;
+    /** Unused on real Pengo (no I/O vector port); kept for API parity. */
     interruptVector = 0xff;
     pendingVBlankIsr = false;
     watchdog_counter = INITIAL_WATCHDOG;
@@ -243,9 +249,10 @@ export class PengoMachine extends BasicScanlineMachine {
 
     constructor() {
         super();
+        // MAME pengo removes Pac-Man's AS_IO map — OUT (n) is a no-op on hardware.
         this.cpu.connectIOBus({
             read: (_p) => 0xff,
-            write: (port, val) => { if ((port & 0xff) === 0) this.interruptVector = val & 0xff; }
+            write: (_port, _val) => { /* no I/O ports on Pengo */ }
         });
         this.cpu.connectMemoryBus({ read: this.readByte, write: this.writeByte });
         this.cpu.retryInterrupts = true;
@@ -261,9 +268,10 @@ export class PengoMachine extends BasicScanlineMachine {
         if (a < 0x8400) return this.vram[a - 0x8000];
         if (a < 0x8800) return this.cram[a - 0x8400];
         if (a < 0x9000) return this.ram[a - 0x8800];
-        if (a < 0x9040) return 0xff; // DSW1
-        if (a < 0x9080) return 0xc9; // DSW0
-        if (a < 0x90c0) return (~this.inputs[1]) & 0xff; // IN1
+        // MAME: 9000 DSW2 (coinage), 9040 DSW1 (lives/cabinet), 9080 IN1, 90c0 IN0
+        if (a < 0x9040) return 0xcc; // DSW2: 1C/1C both
+        if (a < 0x9080) return 0xb0; // DSW1: 3 lives, medium, upright, demo on
+        if (a < 0x90c0) return ((~this.inputs[1]) & 0xff) | 0x10; // IN1, service off
         if (a < 0x9100) return (~this.inputs[0]) & 0xff; // IN0
         return 0xff;
     }
@@ -274,6 +282,7 @@ export class PengoMachine extends BasicScanlineMachine {
         if (a < 0x8400) { this.vram[a - 0x8000] = v; return; }
         if (a < 0x8800) { this.cram[a - 0x8400] = v; return; }
         if (a < 0x9000) { this.ram[a - 0x8800] = v; return; }
+        // Sound regs + sprite coords share 0x9000–0x902f with DSW reads (write-only here)
         if (a >= 0x9000 && a <= 0x901f) {
             this.soundRegs[a - 0x9000] = v & 0x0f;
             return;
@@ -399,7 +408,8 @@ export class PengoMachine extends BasicScanlineMachine {
         }
         if (this.interruptEnabled) {
             var spBefore = this.cpu.getSP();
-            this.cpu.interrupt(this.interruptVector);
+            // IM1 → RST 38h (data ignored). Matches arcade / MAME pengou.
+            this.cpu.interrupt(0xff);
             if (this.cpu.getSP() !== spBefore) {
                 this.pendingVBlankIsr = true;
             }

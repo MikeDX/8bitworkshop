@@ -1,8 +1,13 @@
 /*
  * Shared Pengo hardware helpers for 8bitworkshop demos.
  *
- * Owns reset/IRQ CRT at absolute 0x0000 (_HEADER). Pengo VBLANK is a
- * maskable IRQ (IM2), same family as Pac-Man / MAME.
+ * Owns reset/IRQ CRT at absolute 0x0000 (_HEADER).
+ *
+ * IRQ mode matches real hardware / MAME pengo.cpp:
+ *   - VBLANK is a maskable IRQ
+ *   - CPU runs IM1 (RST 38h) — arcade ROM does `im 1` at reset
+ *   - MAME removes Pac-Man's I/O port-0 vector latch, so IM2+OUT(0)
+ *     does nothing there; homebrew must use IM1 with the ISR at 0x0038
  */
 #pragma opt_code_speed
 #include "pengo_common.h"
@@ -18,10 +23,9 @@ __asm
 _start::
         jp      real_start
 
+        ; IM1: RST 38h — ISR code lives here (not an IM2 vector word)
         .org    0x0038
-        .dw     vblank_isr
-
-vblank_isr:
+vblank_isr::
         push    af
         push    bc
         push    de
@@ -33,7 +37,7 @@ vblank_isr:
         xor     a
         ld      (0x9040), a
 
-        ; Soft sound → hardware WSG @ 0x9000
+        ; Soft sound → hardware Namco WSG @ 0x9000
         ld      hl, #0x8e8c
         ld      de, #0x9010
         ld      bc, #0x0010
@@ -64,6 +68,10 @@ vblank_isr:
         ld      a, (_video_framecount)
         inc     a
         ld      (_video_framecount), a
+
+        ; MAME watchdog is 16 VBLANKs — kick every frame (arcade does too)
+        xor     a
+        ld      (0x9070), a
 
         call    _pengo_run_vblank_hook
 
@@ -99,11 +107,8 @@ real_start:
         ld      (_pengo_vblank_hook+0), a
         ld      (_pengo_vblank_hook+1), a
 
-        xor     a
-        ld      i, a
-        im      2
-        ld      a, #0x38
-        out     (0), a
+        ; Match arcade / MAME (pengou config): IM1, no I/O vector port
+        im      1
 
         jp      _main
         .area   _CODE
@@ -258,3 +263,56 @@ void sound_off(void) {
   sound_voice(1, 0, 0, 0);
   sound_voice(2, 0, 0, 0);
 }
+
+void set_gfx_bank(byte bank) { gfx_bank = bank & 1; }
+void set_palette_bank(byte bank) { palette_bank = bank & 1; }
+void set_colortable_bank(byte bank) { colortable_bank = bank & 1; }
+void set_flip_screen(byte on) { flip_screen = on & 1; }
+
+void scroll_column_y(byte x, sbyte dy, byte fill_tile, byte fill_pal) {
+  byte* vt;
+  byte* ct;
+  byte i;
+  byte n = 32; /* playfield rows y=2..33 */
+  if (x >= 28 || dy == 0) return;
+  vt = pf_column(x);
+  ct = vt + 0x400;
+  if (dy > 0) {
+    byte d = (byte)dy;
+    if (d >= n) {
+      for (i = 0; i < n; i++) { vt[i] = fill_tile; ct[i] = fill_pal; }
+      return;
+    }
+    i = n;
+    while (i > d) {
+      i--;
+      vt[i] = vt[i - d];
+      ct[i] = ct[i - d];
+    }
+    for (i = 0; i < d; i++) {
+      vt[i] = fill_tile;
+      ct[i] = fill_pal;
+    }
+  } else {
+    byte ady = (byte)(-dy);
+    if (ady >= n) {
+      for (i = 0; i < n; i++) { vt[i] = fill_tile; ct[i] = fill_pal; }
+      return;
+    }
+    for (i = 0; i < n - ady; i++) {
+      vt[i] = vt[i + ady];
+      ct[i] = ct[i + ady];
+    }
+    for (i = n - ady; i < n; i++) {
+      vt[i] = fill_tile;
+      ct[i] = fill_pal;
+    }
+  }
+}
+
+void scroll_playfield_y(sbyte dy, byte fill_tile, byte fill_pal) {
+  byte x;
+  for (x = 0; x < 28; x++)
+    scroll_column_y(x, dy, fill_tile, fill_pal);
+}
+
