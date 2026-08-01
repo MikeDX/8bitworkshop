@@ -5,9 +5,7 @@ import { BaseZ80MachinePlatform, getToolForFilename_z80 } from "../common/basepl
 
 const PENGO_PRESETS = [
   { id: 'hello.c', name: 'Hello World' },
-  { id: 'gfxtest.c', name: 'Arcade GFX Test' },
   { id: 'chase.c', name: 'Chase' },
-  { id: 'pengo.rom', name: 'Pengo (Arcade)' },
 ];
 
 class PengoPlatform extends BaseZ80MachinePlatform<PengoMachine> implements Platform {
@@ -15,10 +13,6 @@ class PengoPlatform extends BaseZ80MachinePlatform<PengoMachine> implements Plat
   newMachine()          { return new PengoMachine(); }
   getPresets()          { return PENGO_PRESETS; }
   getDefaultExtension() { return ".c"; };
-  getToolForFilename(fn: string): string {
-    if (fn.endsWith('.rom') || fn.endsWith('.ROM')) return 'rawrom';
-    return getToolForFilename_z80(fn);
-  }
   readAddress(a)        { return this.machine.readConst(a); }
   readVRAMAddress(a)    {
     if (a < 0x400) return this.machine.vram[a];
