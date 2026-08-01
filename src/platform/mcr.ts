@@ -10,12 +10,14 @@ import { PLATFORMS } from "../common/emu";
 const MCR2_PRESETS = [
     { id: 'minimal.c', name: 'Minimal Example' },
     { id: 'gfxtest.c', name: 'Graphics Test' },
+    { id: 'chase.c', name: 'Chase' },
 ];
 
 class MCR2Platform extends BaseZ80MachinePlatform<MCR2Machine> implements Platform {
 
     newMachine()          { return new MCR2Machine(); }
     getPresets()          { return MCR2_PRESETS; }
+    getPlatformName()     { return "Midway MCR-2"; }
     readAddress(a)        { return this.machine.readConst(a); }
     readVRAMAddress(a)    {
         if (a < 0x200) return this.machine.sprram[a];
@@ -23,7 +25,9 @@ class MCR2Platform extends BaseZ80MachinePlatform<MCR2Machine> implements Platfo
         return this.machine.palram[(a - 0xa00) & 0x7f];
     }
     getMemoryMap = function() { return { main:[
-        {name:'Program ROM', start:0x0000, size:0xE000, type:'rom'},
+        {name:'Program ROM', start:0x0000, size:0x8000, type:'rom'},
+        {name:'BG Tile ROM', start:0x8000, size:0x2000, type:'rom'},
+        {name:'Sprite ROM', start:0xA000, size:0x2000, type:'rom'},
         {name:'NVRAM', start:0xE000, size:0x800, type:'ram'},
         {name:'Sprite RAM', start:0xE800, size:0x200, type:'ram'},
         {name:'Video RAM', start:0xF000, size:0x800, type:'ram'},
