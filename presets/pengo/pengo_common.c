@@ -123,12 +123,21 @@ void pengo_irq_enable(void) {
   __asm__("ei");
 }
 
+/*
+ * Upright (x,y) → MAME tilemap (col,row) = (y, 27-x), then pacman_scan_rows.
+ * Same formula Pengo and Pac-Man use in MAME (pacman_v.cpp).
+ */
 word vram_addr(byte x, byte y) {
-  if (y < 2)
-    return 0x3c0 + (word)y * 32 + (29 - x);
-  if (y >= 34)
-    return (word)(y - 34) * 32 + (29 - x);
-  return 0x40 + (word)(27 - x) * 32 + (y - 2);
+  int col2 = (int)y - 2;
+  int row2 = (int)(27 - x) + 2;
+  if (col2 & 0x20)
+    return (word)(row2 + ((col2 & 0x1f) << 5));
+  return (word)(col2 + (row2 << 5));
+}
+
+byte* pf_column(byte x) {
+  /* Playfield columns are 32 linear bytes at 0x40 + (27-x)*32. */
+  return (byte*)(0x8000 + 0x40 + ((word)(27 - x) << 5));
 }
 
 void poke_tile(byte x, byte y, byte tile, byte pal) {
@@ -139,9 +148,28 @@ void poke_tile(byte x, byte y, byte tile, byte pal) {
   *((byte*)(0x8400 + a)) = pal;
 }
 
+void poke_pal(byte x, byte y, byte pal) {
+  if (x >= 28 || y >= 36) return;
+  *((byte*)(0x8400 + vram_addr(x, y))) = pal;
+}
+
 byte peek_tile(byte x, byte y) {
   if (x >= 28 || y >= 36) return T_BLANK;
   return *((byte*)(0x8000 + vram_addr(x, y)));
+}
+
+void fill_column(byte x, byte y0, byte n, byte tile, byte pal) {
+  byte* vt;
+  byte* ct;
+  byte i;
+  if (x >= 28 || y0 < 2 || y0 >= 34) return;
+  if ((word)y0 + n > 34) n = (byte)(34 - y0);
+  vt = pf_column(x) + (y0 - 2);
+  ct = vt + 0x400; /* color RAM is +0x400 from video RAM */
+  for (i = 0; i < n; i++) {
+    vt[i] = tile;
+    ct[i] = pal;
+  }
 }
 
 void clrscr(byte pal) {
