@@ -88,6 +88,8 @@ export interface Platform {
   loadROM(title: string, rom: any, origin?: number); // TODO: Uint8Array
   loadBIOS?(title: string, rom: Uint8Array);
   getROMExtension?(rom: FileData): string;
+  /** CSS-rotate the emu canvas (Galaxian-style). FB stays unrotated. */
+  setDisplayRotate?(degrees: number): void;
 
   loadState?(state: EmuState): void;
   saveState?(): EmuState;
@@ -873,6 +875,20 @@ export abstract class BaseMachinePlatform<T extends Machine> extends BaseDebugPl
   loadROM(title, data, origin?: number) {
     this.machine.loadROM(data, title, origin);
     this.reset();
+  }
+
+  /**
+   * Galaxian-style display rotate: landscape framebuffer, CSS-rotated canvas.
+   * Driven by a rotate tag in source (see IDE applySourceDisplayRotate).
+   */
+  setDisplayRotate(degrees: number) {
+    const m = this.machine as any;
+    if (m && typeof m.rotate === 'number') {
+      m.rotate = degrees | 0;
+    }
+    if (this.video) {
+      this.video.setRotate(degrees | 0);
+    }
   }
 
   loadBIOS: (title, data) => void; // only set if hasBIOS() is true

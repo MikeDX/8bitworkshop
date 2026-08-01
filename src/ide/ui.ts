@@ -241,6 +241,26 @@ function getCurrentPresetTitle(): string {
     return current_preset.title || current_preset.name || current_project.mainPath || "ROM";
 }
 
+/** Read rotate:N from a brace-tag in the main source (Galaxian-style canvas CSS rotate). */
+function getSourceDisplayRotate(): number {
+  if (!current_project?.mainPath) return 0;
+  const text = current_project.getFile(current_project.mainPath);
+  if (typeof text !== 'string') return 0;
+  const m = /\/\*\{\s*[^}]*\brotate\s*:\s*(-?\d+)/.exec(text);
+  return m ? (parseInt(m[1], 10) || 0) : 0;
+}
+
+function applySourceDisplayRotate() {
+  const deg = getSourceDisplayRotate();
+  if (platform.setDisplayRotate) {
+    platform.setDisplayRotate(deg);
+  } else if ((platform as any).video?.setRotate) {
+    const m = (platform as any).machine;
+    if (m && typeof m.rotate === 'number') m.rotate = deg;
+    (platform as any).video.setRotate(deg);
+  }
+}
+
 async function newFilesystem() {
   var basefs: ProjectFilesystem = new WebPresetsFileSystem(platform_id);
   if (isElectron) {
@@ -938,6 +958,8 @@ async function setCompileOutput(data: WorkerResult) {
         clearBreakpoint(); // so we can replace memory (TODO: change toolbar btn)
         _resetRecording();
         await platform.loadROM(getCurrentPresetTitle(), rom, data.origin);
+        // Galaxian-style canvas rotate from /*{rotate:90}*/ in the main source.
+        applySourceDisplayRotate();
         current_output = rom;
         if (!userPaused) _resume();
         writeOutputROMFile();

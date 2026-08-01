@@ -91,13 +91,18 @@ export class RasterVideo {
 
   setRotate(rotate: number) {
     var canvas = this.canvas;
-    if (rotate) {
-      // TODO: aspect ratio?
-      canvas.style.transform = "rotate(" + rotate + "deg)";
-      if (canvas.width < canvas.height)
-        canvas.style.paddingLeft = canvas.style.paddingRight = "10%";
+    if (!canvas) return;
+    var t = rotate ? ("rotate(" + rotate + "deg)") : "";
+    // Match Galaxian/Williams: CSS transform on the .emuvideo canvas only.
+    // Framebuffer / ImageData stay landscape; paste-from-canvas is unrotated.
+    canvas.style.transform = t || null;
+    if (this.vcanvas) {
+      if (t) this.vcanvas.css({ transform: t });
+      else this.vcanvas.css({ transform: "" });
+    }
+    if (rotate && canvas.width < canvas.height) {
+      canvas.style.paddingLeft = canvas.style.paddingRight = "10%";
     } else {
-      canvas.style.transform = null;
       canvas.style.paddingLeft = canvas.style.paddingRight = null;
     }
   }

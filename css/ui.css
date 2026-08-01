@@ -601,6 +601,30 @@ div.asset_editor {
   flex-direction:column;
   align-items:center;
 }
+table.asset_sfx_table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-family: monospace;
+  font-size: 12px;
+}
+table.asset_sfx_table th,
+table.asset_sfx_table td {
+  border: 1px solid #666;
+  padding: 2px 6px;
+  text-align: center;
+}
+input.asset_sfx_cell {
+  width: 3.5em;
+  text-align: center;
+}
+div.asset_sfx_toolbar {
+  margin: 4px 0 8px 0;
+}
+span.asset_sfx_hint {
+  color: #666;
+  font-size: 11px;
+  margin-left: 8px;
+}
 div.asset_toolbar {
   padding:8px;
   margin:8px;
