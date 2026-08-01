@@ -127,8 +127,10 @@ export class ExidyUGBv2 extends BasicScanlineMachine {
         this.charbase = config.charbase;
     }
 
-    loadROM(rom: Uint8Array) {
-        super.loadROM(rom);
+    loadROM(rom: Uint8Array, title?: string, origin?: number) {
+        super.loadROM(rom, title, origin);
+        // Homebrew / default board layout unless a known dump remaps below.
+        this.configure(GAME_CONFIG_DEFAULT);
         if (rom.length == 11616) { // targ
             this.rom.set(rom.slice(0x2800, 0x3000), 0x8000); // copy sprites
             this.rom.set(rom.slice(0x2700, 0x2800), 0x7f00); // copy ff00-ffff
@@ -146,10 +148,13 @@ export class ExidyUGBv2 extends BasicScanlineMachine {
             this.scrnbase = 0x4000;
             this.charbase = 0x6000;
             // TODO: configure, colors
-        } else if (rom.length == 45056) { // venture
-            this.configure(GAME_CONFIG_VENTURE);
-            // TODO: colors
-        } else if (rom.length != 45056) {
+        } else if (rom.length == 45056) {
+            // Same size as Venture MAME dump and cc65 homebrew (PRG+AUDIO+SPRITES).
+            // Venture needs collision; homebrew needs DEFAULT sprite-enable semantics.
+            if (title && /venture/i.test(title)) {
+                this.configure(GAME_CONFIG_VENTURE);
+            }
+        } else {
             throw new Error("Warning: ROM size not recognized: " + rom.length);
         }
         // sprite ROM follows program ROM at offset 0x8000
@@ -328,12 +333,11 @@ export class ExidyUGBv2 extends BasicScanlineMachine {
     }
     drawSprite2() {
         let sprite_enable = this.ram[0x5101];
-        // sprite 2 enabled if bit 6 clear (or collision_mask == 0 for old hw)
-        if ((sprite_enable & 0x40) && this.collision_mask != 0) return;
+        // Motion object 2 is always drawn; bit 6 selects the +16 bank.
         let xpos = this.ram[0x5080];
         let ypos = this.ram[0x50c0];
         let set = (sprite_enable & 0x40) ? 1 : 0;
-        let sprite = (this.ram[0x5100] >> 4) + 32*0 /* TODO? */ + 16 * set;
+        let sprite = ((this.ram[0x5100] >> 4) & 0x0f) + 32 + 16 * set;
         this.drawSprite(xpos, ypos, sprite * 32, 3);
     }
     startScanline(): void {

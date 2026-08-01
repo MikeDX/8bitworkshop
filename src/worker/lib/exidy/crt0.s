@@ -46,7 +46,15 @@ _exit:
 	sta	$4100,x
 	sta	$4200,x
 	sta	$4300,x
-	sta	$6800,x
+	sta	$4800,x		; UGB char RAM (default / Venture)
+	sta	$4900,x
+	sta	$4a00,x
+	sta	$4b00,x
+	sta	$4c00,x
+	sta	$4d00,x
+	sta	$4e00,x
+	sta	$4f00,x
+	sta	$6800,x		; Pepper II / Fax char RAM
 	sta	$6900,x
 	sta	$6a00,x
 	sta	$6b00,x
@@ -84,7 +92,10 @@ NMI:
 IRQ:
 	jmp	(_INTVEC)
 
+; Default ISR: must read $5103 to clear the VBlank IRQ latch (MAME/hardware),
+; otherwise the 6502 re-enters IRQ forever after CLI.
 _HandyRTI:
+	lda	$5103
 	rti
 
 ; CPU vectors

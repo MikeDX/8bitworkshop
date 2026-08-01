@@ -1,9 +1,13 @@
+
 import { Base6502MachinePlatform, Platform } from "../common/baseplatform";
 import { PLATFORMS } from "../common/emu";
 import { ExidyUGBv2 } from "../machine/exidy";
 
 var EXIDY_PRESETS = [
-    { id: 'minimal.c', name: 'Minimal Example', category: "C" },
+    { id: 'hello.c', name: 'Hello World', category: "C" },
+    { id: 'gfxtest.c', name: 'Graphics Test' },
+    { id: 'chase.c', name: 'Chase Game' },
+    { id: 'minimal.c', name: 'Minimal Example' },
 ];
 
 class ExidyUGBPlatform extends Base6502MachinePlatform<ExidyUGBv2> implements Platform {
@@ -15,15 +19,19 @@ class ExidyUGBPlatform extends Base6502MachinePlatform<ExidyUGBv2> implements Pl
     getMemoryMap() {
         return { main: [
             { name: 'RAM', start: 0x00, size: 0x400, type: 'ram' },
+            { name: 'Screen RAM', start: 0x4000, size: 0x400, type: 'ram' },
+            { name: 'Character RAM', start: 0x4800, size: 0x800, type: 'ram' },
             { name: 'Sprite I/O', start: 0x5000, size: 0x100, type: 'io' },
             { name: 'I/O', start: 0x5100, size: 0x3, type: 'io' },
             { name: 'PIA 6821', start: 0x5200, size: 0xf, type: 'io' },
             { name: 'Color Latches', start: 0x5210, size: 0x3, type: 'io' },
-            { name: 'Screen RAM', start: 0x4000, size: 0x400, type: 'ram' },
-            { name: 'Character RAM', start: 0x4800, size: 0x800, type: 'ram' },
             { name: 'Program ROM', start: 0x8000, size: 0x8000, type: 'rom' },
         ]
     } }
+
+    showHelp() {
+        return "https://8bitworkshop.com/docs/platforms/arcade/";
+    }
 }
 
 PLATFORMS["exidy"] = ExidyUGBPlatform;
