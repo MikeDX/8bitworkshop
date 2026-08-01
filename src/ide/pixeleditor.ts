@@ -237,6 +237,10 @@ export function validateAssetData(datastr: string, fmt): string | null {
     if (words.length < 1) {
       return `Palette requires at least 1 value, found ${words.length}`;
     }
+  } else if (fmt.sfx) {
+    if (words.length < 1) {
+      return `SFX table requires at least 1 value, found ${words.length}`;
+    }
   }
   return null;
 }
@@ -719,6 +723,123 @@ export class PaletteEditorView extends PixNode {
   updateRight() {
     this.updateCells();
     return true;
+  }
+}
+
+/**
+ * Minimal source-backed SFX table editor.
+ * Format: repeating (note, vol, frames) until 0xff.
+ * Asset header: sfx set to "ay", optional stride (default 3).
+ * Edits rewrite the same-length hex array in source (fixed capacity).
+ */
+export class SfxTableEditor extends PixNode {
+  parentdiv: JQuery;
+  table: JQuery;
+  fmt: any;
+  stride: number;
+  private previewCtx: AudioContext | null = null;
+
+  constructor(parentdiv: JQuery, fmt: any) {
+    super();
+    this.parentdiv = parentdiv;
+    this.fmt = fmt || {};
+    this.stride = this.fmt.stride || 3;
+    this.table = $('<table class="asset_sfx_table"/>').appendTo(parentdiv);
+    var toolbar = $('<div class="asset_sfx_toolbar"/>').appendTo(parentdiv);
+    $('<button type="button"/>').text('Play').appendTo(toolbar).click(() => this.preview());
+    $('<span class="asset_sfx_hint"/>')
+      .text(' note · vol · frames · 0xff end')
+      .appendTo(toolbar);
+  }
+
+  updateLeft() {
+    return true;
+  }
+
+  updateRight() {
+    this.words = this.left.words;
+    this.rebuildTable();
+    return true;
+  }
+
+  private rebuildTable() {
+    this.table.empty();
+    var head = $('<tr/>').appendTo(this.table);
+    $('<th/>').text('#').appendTo(head);
+    $('<th/>').text('Note').appendTo(head);
+    $('<th/>').text('Vol').appendTo(head);
+    $('<th/>').text('Frames').appendTo(head);
+
+    var words = this.words || [];
+    var row = 0;
+    for (var i = 0; i + this.stride <= words.length; i += this.stride) {
+      if (words[i] === 0xff) break;
+      this.addRow(row++, i, words[i], words[i + 1], words[i + 2]);
+    }
+    if (row === 0) {
+      $('<tr/>').append($('<td colspan="4"/>').text('(empty — ends with 0xff)')).appendTo(this.table);
+    }
+  }
+
+  private addRow(rowIndex: number, byteOfs: number, note: number, vol: number, frames: number) {
+    var tr = $('<tr/>').appendTo(this.table);
+    $('<td/>').text(String(rowIndex)).appendTo(tr);
+    this.addCell(tr, byteOfs, note, 0x3f);
+    this.addCell(tr, byteOfs + 1, vol, 15);
+    this.addCell(tr, byteOfs + 2, frames, 255);
+  }
+
+  private addCell(tr: JQuery, wordIndex: number, value: number, max: number) {
+    var td = $('<td/>').appendTo(tr);
+    var input = $('<input type="number" class="asset_sfx_cell"/>')
+      .attr({ min: 0, max: max, value: value })
+      .appendTo(td);
+    input.on('change', () => {
+      var v = parseInt(input.val() as string, 10);
+      if (isNaN(v)) v = 0;
+      if (v < 0) v = 0;
+      if (v > max) v = max;
+      input.val(v);
+      if (!this.words) return;
+      // Ensure mutable array
+      var next = Array.from(this.words);
+      next[wordIndex] = v;
+      this.words = next;
+      this.refreshLeft();
+    });
+  }
+
+  /** Rough pitch preview (not cycle-accurate AY). note 0x10 = C2. */
+  private preview() {
+    var words = this.words || [];
+    if (!this.previewCtx) {
+      var AC = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!AC) return;
+      this.previewCtx = new AC();
+    }
+    var ctx = this.previewCtx;
+    var t = ctx.currentTime + 0.05;
+    for (var i = 0; i + this.stride <= words.length; i += this.stride) {
+      var note = words[i];
+      if (note === 0xff) break;
+      var vol = words[i + 1] & 15;
+      var frames = words[i + 2] || 1;
+      var dur = frames / 60;
+      if (note >= 0x10 && vol > 0) {
+        var midi = (note - 0x10) + 36; // C2..
+        var freq = 440 * Math.pow(2, (midi - 69) / 12);
+        var osc = ctx.createOscillator();
+        var gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = freq;
+        gain.gain.value = (vol / 15) * 0.15;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + dur);
+      }
+      t += dur;
+    }
   }
 }
 

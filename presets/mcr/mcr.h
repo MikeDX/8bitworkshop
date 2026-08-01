@@ -27,7 +27,26 @@ __sfr __at (0xf1) CTC1;
 __sfr __at (0xf2) CTC2;
 __sfr __at (0xf3) CTC3;
 
+/*
+ * Homebrew AY access via SSIO command latches (MAME 0x1c-0x1f).
+ * 8bw maps these straight to dual AY-3-8910 chips. Stock timber SSIO
+ * ROMs ignore them — replace SSIO firmware later for real hardware audio.
+ */
+__sfr __at (0x1c) AY1_REG;
+__sfr __at (0x1d) AY1_DATA;
+__sfr __at (0x1e) AY2_REG;
+__sfr __at (0x1f) AY2_DATA;
+
 #define WATCHDOG()  do { WATCHDOG_PORT = 0; } while (0)
+
+inline void mcr_ay1(byte reg, byte data) {
+  AY1_REG = reg;
+  AY1_DATA = data;
+}
+inline void mcr_ay2(byte reg, byte data) {
+  AY2_REG = reg;
+  AY2_DATA = data;
+}
 
 /* timber IP0 */
 #define COIN1   (!(INPUT0 & 0x01))
@@ -117,19 +136,15 @@ inline void hide_all_sprites(void) {
  * Palette write (MAME mcr_paletteram9_w):
  *   color = data | ((offset & 1) << 8)
  *   R = bits[8:6], G = bits[2:0], B = bits[5:3]
- * So R[2] comes from A0 of the *last* write to the pair — write odd last
- * when r[2]=1, even last when r[2]=0.
+ * R[2] is A0 of the write — one store to even (r2=0) or odd (r2=1).
  */
 inline void set_color(byte index, byte r3, byte g3, byte b3) {
   byte i = index & 63;
   byte data = (byte)((g3 & 7) | ((b3 & 7) << 3) | ((r3 & 3) << 6));
-  if (r3 & 4) {
-    palram[i * 2] = 0;
+  if (r3 & 4)
     palram[i * 2 + 1] = data;
-  } else {
-    palram[i * 2 + 1] = 0;
+  else
     palram[i * 2] = data;
-  }
 }
 
 inline void mcr_init(void) {

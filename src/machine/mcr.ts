@@ -88,6 +88,12 @@ export class MCR2Machine extends BasicScanlineMachine {
     /** Bit N set → next write to CTC channel N is a time constant, not control */
     ctcTimeConstFollows = 0;
     frameCount = 0;
+    /**
+     * Homebrew BG scroll (real 91490 has none). NES-style logical pixels;
+     * rendering scales ×2. scrollX is signed 8-bit (e.g. 248 = -8).
+     */
+    scrollX = 0;
+    scrollY = 0;
 
     audioadapter: TssChannelAdapter;
     psg1: AY38910_Audio;
@@ -150,6 +156,8 @@ export class MCR2Machine extends BasicScanlineMachine {
                 if (addr >= 0xF0 && addr <= 0xF3) {
                     return 0;
                 }
+                if (addr == 0xF5) return this.scrollY & 0xff;
+                if (addr == 0xF6) return this.scrollX & 0xff;
                 // Unpulled SSIO bits read high (active-low idle)
                 return 0xff;
             },
@@ -158,6 +166,14 @@ export class MCR2Machine extends BasicScanlineMachine {
                 if (addr == 0xE0) {
                     this.watchdog_counter = INITIAL_WATCHDOG;
                 }
+                // Homebrew: SSIO latches → AY (see mcr.h AY1_*/AY2_*)
+                if (addr == 0x1c) this.psg1.selectRegister(val);
+                else if (addr == 0x1d) this.psg1.setData(val);
+                else if (addr == 0x1e) this.psg2.selectRegister(val);
+                else if (addr == 0x1f) this.psg2.setData(val);
+                // Homebrew BG scroll (NES-style logical pixels)
+                if (addr == 0xF5) this.scrollY = val;
+                if (addr == 0xF6) this.scrollX = val;
                 if (addr >= 0xF0 && addr <= 0xF3) {
                     // Z80 CTC: after a control word with "time constant follows"
                     // (bit 2), the next write to that channel is the down-count
@@ -204,26 +220,40 @@ export class MCR2Machine extends BasicScanlineMachine {
         let pixofs = sl * MCR2_CANVAS_WIDTH;
 
         // BG at half vertical res, doubled via drawTileLine (even+odd).
+        // Homebrew scroll: top of screen shows nametable at scrollY (logical px ×2).
         if ((sl & 1) == 0) {
-            let half = sl >> 1;
-            let tileRow = Math.floor(half / MCR2_TILE_SIZE);
-            let tileY = half % MCR2_TILE_SIZE;
+            let srcSl = sl + (this.scrollY & 0xff) * 2;
+            if (srcSl >= 0 && srcSl < MCR2_NUM_VISIBLE_SCANLINES) {
+                let half = srcSl >> 1;
+                let tileRow = Math.floor(half / MCR2_TILE_SIZE);
+                let tileY = half % MCR2_TILE_SIZE;
+                let sx = (this.scrollX << 24) >> 24; // signed
+                let originX = sx * 2;
+                let tileW = MCR2_TILE_SIZE * 2;
+                let scrollTilesX = Math.floor(originX / tileW);
+                let scrollPixX = ((originX % tileW) + tileW) % tileW;
 
-            if (tileRow < MCR2_TILE_ROWS) {
-                for (let tileCol = 0; tileCol < MCR2_TILE_COLS; tileCol++) {
-                    let vramOfs = (tileRow * MCR2_TILE_COLS + tileCol) * 2;
-                    let byte0 = this.vram[vramOfs];
-                    let byte1 = this.vram[vramOfs + 1];
+                if (tileRow < MCR2_TILE_ROWS) {
+                    for (let tileCol = 0; tileCol <= MCR2_TILE_COLS; tileCol++) {
+                        let srcCol = (tileCol + scrollTilesX) & 31;
+                        let vramOfs = (tileRow * MCR2_TILE_COLS + srcCol) * 2;
+                        let byte0 = this.vram[vramOfs];
+                        let byte1 = this.vram[vramOfs + 1];
 
-                    let tileCode = byte0 | ((byte1 & 0x03) << 8);
-                    let tilePalette = (byte1 >> 4) & 0x03;
-                    let flipX = (byte1 & 0x04) != 0;
-                    let flipY = (byte1 & 0x08) != 0;
+                        let tileCode = byte0 | ((byte1 & 0x03) << 8);
+                        let tilePalette = (byte1 >> 4) & 0x03;
+                        let flipX = (byte1 & 0x04) != 0;
+                        let flipY = (byte1 & 0x08) != 0;
 
-                    let ty = flipY ? (15 - tileY) : tileY;
-                    let pixX = tileCol * MCR2_TILE_SIZE * 2;
-                    this.drawTileLine(pixofs + pixX, tileCode, ty, tilePalette, flipX);
+                        let ty = flipY ? (15 - tileY) : tileY;
+                        let pixX = tileCol * tileW - scrollPixX;
+                        if (pixX <= -16 || pixX >= MCR2_CANVAS_WIDTH) continue;
+                        this.drawTileLine(pixofs + pixX, tileCode, ty, tilePalette, flipX);
+                    }
                 }
+            } else {
+                // Off-nametable (title scroll-in) — clear this line pair
+                this.pixels.fill(this.palette[0] || 0xFF000000, pixofs, pixofs + MCR2_CANVAS_WIDTH * 2);
             }
         }
 
@@ -338,6 +368,8 @@ export class MCR2Machine extends BasicScanlineMachine {
         this.ctcVector = 0;
         this.ctcTimeConstFollows = 0;
         this.frameCount = 0;
+        this.scrollX = 0;
+        this.scrollY = 0;
         this.inputs.set([0xff, 0xff, 0xff, 0xff, 0xff]);
         this.psg1.reset();
         this.psg2.reset();

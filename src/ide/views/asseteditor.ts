@@ -415,6 +415,12 @@ export class AssetEditorView implements ProjectView, pixed.EditorContext {
             this.registerAsset("palette", first, 0);
             nassets++;
           }
+          // is this an SFX / note table?
+          else if (frag.fmt.sfx) {
+            node = node.addRight(new pixed.SfxTableEditor(block, frag.fmt));
+            this.registerAsset("sfx", first, 0);
+            nassets++;
+          }
           else {
             // TODO: other kinds of resources?
           }

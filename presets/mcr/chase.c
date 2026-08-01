@@ -1,5 +1,5 @@
 /*
- * Chase for Midway MCR-2 — port of Shiru's NES Chase (source of truth).
+ * Chase for Midway MCR (91490 / timber) — port of Shiru's NES Chase.
  *
  * NES cells are 16×16; MCR shows 16×16 tiles (8×8×2) and 32×32 sprites.
  * Each map cell = 2×2 MCR tiles (32×32) so cell size matches sprites and
@@ -93,6 +93,85 @@ void mcr_boot(void) {
 
 byte joy_left, joy_right, joy_up, joy_down, joy_fire;
 byte fire_prev;
+
+/* ---- Minimal AY SFX (note, vol, frames; 0xff = end) ----
+ * Edited in Asset Editor via {sfx:"ay"} tags on each table. */
+#define NOTE_LO 0x10
+#define AY_ENABLE 7
+#define AY_VOL_A  8
+
+const word ay_period[48] = {
+  1721, 1625, 1535, 1448, 1367, 1290, 1218, 1149,
+  1085, 1024,  967,  912,  861,  813,  767,  724,
+   683,  645,  609,  575,  542,  512,  483,  456,
+   431,  406,  383,  362,  342,  322,  304,  287,
+   271,  256,  242,  228,  215,  203,  192,  181,
+   171,  161,  152,  144,  136,  128,  121,  114,
+};
+
+const byte sfx_start[] = /*{sfx:"ay",stride:3}*/ {
+  0x28,15,4, 0x2d,14,4, 0x2f,14,4, 0x34,13,4, 0x39,12,4, 0x3b,12,4,
+  0x28,12,4, 0x2d,11,4, 0x2f,11,4, 0x34,10,4, 0x39,10,4, 0x3b,9,4,
+  0x28,9,4,  0x2d,8,4,  0x2f,8,4,  0x34,7,4,  0x39,7,4,  0x3b,6,4,
+  0xff
+};
+const byte sfx_item[] = /*{sfx:"ay",stride:3}*/ {
+  0x28,12,1, 0x2d,11,1, 0x2c,10,1, 0x2f,9,1,
+  0x28,8,1,  0x2d,7,1,  0x2c,6,1,  0x2f,5,1,
+  0xff
+};
+const byte sfx_hit[] = /*{sfx:"ay",stride:3}*/ {
+  0x18,12,2, 0x14,10,2, 0x10,8,3, 0x0c,6,4, 0x08,4,6,
+  0xff
+};
+
+static const byte* sfx_ptr;
+byte sfx_timer;
+
+void sound_init(void) {
+  mcr_ay1(AY_ENABLE, 0xfe); /* tone A on; noise/B/C off */
+  mcr_ay1(AY_VOL_A, 0);
+  mcr_ay2(AY_ENABLE, 0xff);
+  sfx_ptr = 0;
+  sfx_timer = 0;
+}
+
+void sfx_stop(void) {
+  sfx_ptr = 0;
+  sfx_timer = 0;
+  mcr_ay1(AY_VOL_A, 0);
+}
+
+void sfx_play(const byte* seq) {
+  sfx_ptr = seq;
+  sfx_timer = 0;
+}
+
+void sfx_update(void) {
+  byte note, vol, frames;
+  if (!sfx_ptr) return;
+  if (sfx_timer) {
+    sfx_timer--;
+    if (sfx_timer) return;
+  }
+  note = *sfx_ptr++;
+  if (note == 0xff) {
+    sfx_stop();
+    return;
+  }
+  vol = *sfx_ptr++;
+  frames = *sfx_ptr++;
+  if (!frames) frames = 1;
+  sfx_timer = frames;
+  if (note < NOTE_LO) {
+    mcr_ay1(AY_VOL_A, 0);
+  } else {
+    word p = ay_period[note - NOTE_LO];
+    mcr_ay1(0, (byte)p);
+    mcr_ay1(1, (byte)(p >> 8));
+    mcr_ay1(AY_VOL_A, (byte)(vol & 15));
+  }
+}
 
 void read_controls(void) {
   joy_left  = LEFT1;
@@ -276,15 +355,25 @@ void apply_bg_rgb(const byte* rgb48) {
 
 void apply_spr_rgb(void) {
   byte i;
-  /* 91464: color = ((~attrib & 3) << 4) & 0x30 → pal0=48, pal1=32, pal2/3=0 */
-  static const byte spr_base[4] = { 48, 32, 0, 0 };
-  for (i = 0; i < 4; i++) {
-    byte base = spr_base[i];
-    const byte* p = &chase_pal_spr_rgb[i * 12];
-    set_color(base,     p[0], p[1], p[2]);
-    set_color(base + 1, p[3], p[4], p[5]);
-    set_color(base + 2, p[6], p[7], p[8]);
-    set_color(base + 3, p[9], p[10], p[11]);
+  /*
+   * 91464: attrib 0 → bank 48 (player), attrib 1 → bank 32 (enemies).
+   * Player: pens 5-7 from NES spr pal 0.
+   * Enemies: three copies of the same shape use pens 5-7 / 9-11 / 13-15
+   * from NES spr pals 1/2/3 — keeps BG pens 0-3 free in both banks.
+   */
+  const byte* p;
+  /* player @ 48 */
+  p = &chase_pal_spr_rgb[0];
+  set_color(48 + 5, p[3], p[4], p[5]);
+  set_color(48 + 6, p[6], p[7], p[8]);
+  set_color(48 + 7, p[9], p[10], p[11]);
+  /* enemies @ 32 — three pen bands */
+  for (i = 0; i < 3; i++) {
+    byte base = (byte)(32 + 5 + i * 4);
+    p = &chase_pal_spr_rgb[(i + 1) * 12];
+    set_color(base,     p[3], p[4], p[5]);
+    set_color(base + 1, p[6], p[7], p[8]);
+    set_color(base + 2, p[9], p[10], p[11]);
   }
 }
 
@@ -321,12 +410,14 @@ void draw_cell(byte x, byte y) {
   if (t == T_WALL)
     set_cell_tiles(x, y, TILE_WALL_TL, TILE_WALL_TR, TILE_WALL_BL, TILE_WALL_BR, wpal);
   else if (t == T_ITEM) {
+    /* Same pal as floor: pens 0-1 = black+bg speckles, 2-3 = gem colours */
     if (spark)
       set_cell_tiles(x, y, TILE_GEM1_TL, TILE_GEM1_TR, TILE_GEM1_BL, TILE_GEM1_BR, PAL_GEM);
     else
       set_cell_tiles(x, y, TILE_GEM0_TL, TILE_GEM0_TR, TILE_GEM0_BL, TILE_GEM0_BR, PAL_GEM);
   } else if (t == T_FLOOR)
-    set_cell_tiles(x, y, TILE_FLOOR, TILE_FLOOR, TILE_FLOOR, TILE_FLOOR, wpal);
+    /* Floor CHR is pens 0-1 only; must share PAL_GEM with items (NES attrs). */
+    set_cell_tiles(x, y, TILE_FLOOR, TILE_FLOOR, TILE_FLOOR, TILE_FLOOR, PAL_GEM);
   else
     set_cell_tiles(x, y, TILE_EMPTY, TILE_EMPTY, TILE_EMPTY, TILE_EMPTY, 0);
 }
@@ -377,6 +468,7 @@ void try_collect(byte id) {
   draw_cell(tx, ty);
   items_collected++;
   draw_hud();
+  sfx_play(sfx_item);
 }
 
 void load_level(byte li) {
@@ -441,11 +533,12 @@ void draw_actors(void) {
     }
     if (a->kind == 0) {
       shape = (frame_cnt & 8) ? SPR_PLAYER2 : SPR_PLAYER;
-      pal = 0;
+      pal = 0; /* timber attrib 0 → color bank 48 */
     } else {
-      shape = SPR_ENEMY;
-      pal = a->kind; /* NES spr pals 1/2/3 */
-      if (pal > 3) pal = 3;
+      /* kind 1/2/3 → SPR_ENEMY1/2/3 (distinct pen bands @ bank 32) */
+      shape = (byte)(SPR_ENEMY1 + (a->kind - 1));
+      if (shape > SPR_ENEMY3) shape = SPR_ENEMY3;
+      pal = 1;
     }
     set_sprite_xy(i, shape, pal, px, py);
   }
@@ -539,6 +632,7 @@ void advance_actor(byte id) {
 
 void wait_frame(void) {
   wait_vblank();
+  sfx_update();
 }
 
 void wait_frames(byte n) {
@@ -586,17 +680,18 @@ void title_screen(void) {
   apply_spr_rgb();
   blit_nametable(chase_title_nt, chase_title_attr);
 
-  /* Real 91490 has no BG scroll — static title + blinking PRESS START. */
   wait = 160;
   frame_cnt = 0;
-  /* Drain any stuck press, then wait for a new press+release. */
   read_controls();
   while (joy_fire) { wait_frame(); read_controls(); }
 
   while (1) {
     wait_frame();
     read_controls();
-    if (joy_fire) break;
+    if (joy_fire) {
+      sfx_play(sfx_start);
+      break;
+    }
 
     if (wait) {
       --wait;
@@ -617,9 +712,9 @@ void show_level_banner(void) {
   hide_all_sprites();
   apply_bg_rgb(chase_pal_game_rgb[game_level]);
   blit_nametable(chase_level_scr_nt, chase_level_scr_attr);
-  /* Letters = pen 2, digits = pen 3 — both bright white like NES pal_col(2/3)=$30 */
+  /* Letters = pen 2 (white); large digit = pen 3 (gold) — distinct like NES accents */
   set_color(2, 7, 7, 7);
-  set_color(3, 7, 7, 7);
+  set_color(3, 7, 6, 0);
   patch_large_digit((byte)(game_level + 1), 20, 12);
   wait_frames(50);
 }
@@ -660,8 +755,6 @@ void show_well_done(void) {
     else set_color(2, 0, 3, 6);
     read_controls();
     if (joy_fire) break;
-  }
-  while (joy_fire) { wait_frame(); read_controls(); }
   }
   while (joy_fire) { wait_frame(); read_controls(); }
 }
@@ -710,6 +803,7 @@ void game_loop(void) {
     }
     draw_actors();
     if (!game_clear && hit_player()) {
+      sfx_play(sfx_hit);
       game_done = 1;
       wait_frames(60);
     }
@@ -720,6 +814,7 @@ void game_loop(void) {
 
 void main(void) {
   mcr_init();
+  sound_init();
   setup_palette();
   (void)chase_bg_gfx[0];
   (void)chase_spr_gfx[0];
