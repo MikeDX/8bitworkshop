@@ -66,6 +66,7 @@ void stop_fright(void) {
 
 void play_prelude(void) {
   /* CH1/CH2 each have a 2-entry song table: bit0=start, bit1=intermission. */
+  if (attract_demo) return;
   sfx_off();
   CH1_W_NUM = 1;
   CH2_W_NUM = 1;

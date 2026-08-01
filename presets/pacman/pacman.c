@@ -19,6 +19,17 @@
  * live in pacman_actors.c / pacman_render.c. */
 #pragma opt_code_size
 
+/* Uncomment ONE for maze-only boot:
+ *   ATTRACT_DEV    — playback attract_path[] (silent)
+ *   ATTRACT_RECORD — joystick training; logs DemoKeys @ 0x4CB0
+ */
+// #define ATTRACT_DEV
+#define ATTRACT_RECORD
+
+#if defined(ATTRACT_RECORD) && defined(ATTRACT_DEV)
+#error "Define ATTRACT_RECORD or ATTRACT_DEV, not both"
+#endif
+
 #include "pacman_common.h"
 #include "pacman_assets.h"
 #include "pacman_game.h"
@@ -38,7 +49,7 @@ word fruit_ticks;
 word fruit_visible;
 word force_house;
 word freeze_ticks;
-word pac_x, pac_y;
+byte pac_tx, pac_ty, pac_ox, pac_oy;
 word pac_frac;
 
 byte lives;
@@ -62,6 +73,7 @@ byte pac_stop;
 byte global_dot_mode;
 byte global_dot_counter;
 byte attract_demo;
+byte attract_corridor;
 byte eyes_present;
 
 Ghost ghosts[GHOST_N];
@@ -321,16 +333,19 @@ static const char ghost_nicks[4][9] = {
 #define ATTRACT_COPY_T     660
 #define ATTRACT_CHASE_T0   720
 #endif
-#define ATTRACT_ROW_CY     (20 * 8 + 4)
-/* Pixel centers ≥224 are past the right edge (sprite hardware wraps). */
-#define ATTRACT_SPAWN_X    240
+#define ATTRACT_ROW_TY     20
+#define ATTRACT_ROW_OY     4
+/* Pixel centers ≥224 are past the right edge (sprite hardware wraps).
+ * Stored as tile+offset: 240 → tx=30, ox=0. */
+#define ATTRACT_SPAWN_TX   30
+#define ATTRACT_SPAWN_OX   0
 #define ATTRACT_GHOST_GAP  16  /* frames between Pac / ghost spawns */
 #define ATTRACT_PAL_BLACK  0   /* unused all-black sprite palette */
 
 static void attract_blank_offscreen(byte spawned) {
   byte i;
   /* Pac / ghosts past the seam: black pal (no wrap flash). */
-  if (pac_x < 8 || pac_x >= 224)
+  if (pac_tx < 1 || pac_tx >= 28)
     ((byte*)0x4ff0)[1] = ATTRACT_PAL_BLACK;
   for (i = 0; i < GHOST_N; i++) {
     Ghost* g = &ghosts[i];
@@ -338,14 +353,14 @@ static void attract_blank_offscreen(byte spawned) {
       hide_sprite((byte)(i + 1));
       continue;
     }
-    g->y = ATTRACT_ROW_CY;
-    if (g->x < 8 || g->x >= 224)
+    g->ty = ATTRACT_ROW_TY; g->oy = ATTRACT_ROW_OY;
+    if (g->tx < 1 || g->tx >= 28)
       ((byte*)0x4ff0)[(i + 1) * 2 + 1] = ATTRACT_PAL_BLACK;
   }
   hide_sprite(SPR_FRUIT); /* no fruit on attract */
 }
 
-/* Horizontal-only step — no tunnel wrap. Enter from x≥224; park after exit. */
+/* Horizontal-only step — no tunnel wrap. Enter from tx≥28; park after exit. */
 static void attract_move_ghosts(byte spawned) {
   byte i, s, steps;
   Ghost* g;
@@ -354,17 +369,19 @@ static void attract_move_ghosts(byte spawned) {
     if (!(spawned & (1 << i))) continue;
     g = &ghosts[i];
     /* Parked after leaving the visible area. */
-    if (g->dir == DIR_RIGHT && g->x >= 224) continue;
-    if (g->dir == DIR_LEFT && g->x < 8) continue;
+    if (g->dir == DIR_RIGHT && g->tx >= 28) continue;
+    if (g->dir == DIR_LEFT && g->tx < 1) continue;
     steps = take_steps(&g->frac, ghost_speed_cached(g));
     for (s = 0; s < steps; s++) {
       if (g->dir == DIR_LEFT) {
-        if (g->x > 0) g->x--;
+        if (g->ox) g->ox--;
+        else if (g->tx) { g->tx--; g->ox = 7; }
       } else if (g->dir == DIR_RIGHT) {
-        if (g->x < 255) g->x++;
+        g->ox++;
+        if (g->ox >= 8) { g->ox = 0; g->tx++; }
       }
     }
-    g->y = ATTRACT_ROW_CY;
+    g->ty = ATTRACT_ROW_TY; g->oy = ATTRACT_ROW_OY;
   }
 }
 
@@ -382,6 +399,7 @@ static void attract_chase(void) {
   word chase_t = 0;
 
   attract_demo = 1;
+  attract_corridor = 1;
   level = 0;
   dots_left = 244;
   dots_eaten = 0;
@@ -391,14 +409,14 @@ static void attract_chase(void) {
 
   actors_reset_level(0);
   /* Pac spawns at chase_t==0; ghosts follow on ATTRACT_GHOST_GAP beats — all at 240. */
-  pac_x = ATTRACT_SPAWN_X;
-  pac_y = ATTRACT_ROW_CY;
+  pac_tx = ATTRACT_SPAWN_TX; pac_ox = ATTRACT_SPAWN_OX;
+  pac_ty = ATTRACT_ROW_TY; pac_oy = ATTRACT_ROW_OY;
   pac_dir = DIR_LEFT;
   pac_want = DIR_LEFT;
 
   for (i = 0; i < GHOST_N; i++) {
-    ghosts[i].x = 0;
-    ghosts[i].y = 0;
+    ghosts[i].tx = 0; ghosts[i].ox = 0;
+    ghosts[i].ty = 0; ghosts[i].oy = 0;
     ghosts[i].dir = DIR_LEFT;
     ghosts[i].next_dir = DIR_LEFT;
     ghosts[i].mode = MODE_CHASE;
@@ -428,13 +446,13 @@ static void attract_chase(void) {
       }
     }
 
-    /* Ghosts spawn one-by-one at ATTRACT_SPAWN_X; only timing differs. */
+    /* Ghosts spawn one-by-one at ATTRACT_SPAWN_TX; only timing differs. */
     for (i = 0; i < GHOST_N; i++) {
       word t_spawn = (word)((word)(i + 1) << 4); /* ATTRACT_GHOST_GAP==16 */
       if (!(spawned & (1 << i)) && chase_t == t_spawn) {
         Ghost* g = &ghosts[i];
-        g->x = ATTRACT_SPAWN_X;
-        g->y = ATTRACT_ROW_CY;
+        g->tx = ATTRACT_SPAWN_TX; g->ox = ATTRACT_SPAWN_OX;
+        g->ty = ATTRACT_ROW_TY; g->oy = ATTRACT_ROW_OY;
         g->frac = 0;
         g->speed_sig = 0xff;
         g->dir = g->next_dir = (hunt || power_ticks) ? DIR_RIGHT : DIR_LEFT;
@@ -520,11 +538,270 @@ static void attract_chase(void) {
     if (chase_t != 0xFFFF) chase_t++;
   }
 
+  attract_corridor = 0;
   attract_demo = 0;
   hide_all_sprites();
   sfx_off();
   power_ticks = 0;
   freeze_ticks = 0;
+}
+
+/*
+ * Maze attract: silent, no PLAYER/READY.
+ *
+ * ATTRACT_DEV: timed fake-stick from attract_path[].
+ * ATTRACT_RECORD: live stick; log dir *changes* as DemoKey @ 0x4CB0
+ *   (timer resets at maze start; first key is always {0, DIR_LEFT}).
+ *
+ * Playback entries: hold `.dir` from `.when` until the next entry.
+ * Straights omitted. DEMO_REP warps to ATTRACT_PATH_LOOP.
+ */
+#define DEMO_END   0xFFFF
+#define DEMO_REP   0xFE   /* not a DIR_*; .when = frame to wrap */
+
+typedef struct {
+  word when;
+  byte dir;
+} DemoKey;
+
+/* ---- ATTRACT_RECORD: fixed RAM so you can dump it from the emulator ----
+ * Layout @ 0x4CB0 (after _DATA ~0x4CAA, before sound @ 0x4E8C):
+ *   DemoKey demo_rec[DEMO_REC_MAX]   — 3 bytes each (when, dir)
+ *   byte    demo_rec_n               — entry count (incl. initial LEFT)
+ * Dump e.g. MAME:  dump 4CB0,260
+ */
+#ifdef ATTRACT_RECORD
+#define DEMO_REC_BASE  0x4CB0
+#define DEMO_REC_MAX   128           /* 128*3 = 384 → ends 0x4E30 */
+
+static DemoKey __at(DEMO_REC_BASE) demo_rec[DEMO_REC_MAX];
+static byte __at(DEMO_REC_BASE + DEMO_REC_MAX * 3) demo_rec_n;
+static byte demo_rec_last;
+
+static word demo_t;
+
+static void demo_rec_begin(void) {
+  demo_t = 0;
+  demo_rec_n = 0;
+  demo_rec_last = DIR_LEFT;
+  pac_dir = DIR_LEFT;
+  pac_want = DIR_LEFT;
+  demo_rec[0].when = 0;
+  demo_rec[0].dir = DIR_LEFT;
+  demo_rec_n = 1;
+}
+
+/* Edge-trigger on stick: record only when held dir changes. */
+static void demo_rec_sample(void) {
+  byte d = DIR_NONE;
+  if (LEFT1) d = DIR_LEFT;
+  if (RIGHT1) d = DIR_RIGHT;
+  if (UP1) d = DIR_UP;
+  if (DOWN1) d = DIR_DOWN;
+
+  if (d == DIR_NONE)
+    return; /* keep pac_want / last recorded */
+
+  pac_want = d;
+  if (d == demo_rec_last)
+    return;
+  demo_rec_last = d;
+  if (demo_rec_n >= DEMO_REC_MAX)
+    return;
+  demo_rec[demo_rec_n].when = demo_t;
+  demo_rec[demo_rec_n].dir = d;
+  demo_rec_n++;
+}
+
+static void demo_rec_finish(void) {
+  /* Optional end marker if room — count in demo_rec_n stays real keys. */
+  if (demo_rec_n < DEMO_REC_MAX) {
+    demo_rec[demo_rec_n].when = DEMO_END;
+    demo_rec[demo_rec_n].dir = 0;
+  }
+  put_string(7, 16, "REC", 0x0F);
+  put_digit(11, 16, (byte)(demo_rec_n / 100), 0x0F);
+  put_digit(12, 16, (byte)((demo_rec_n / 10) % 10), 0x0F);
+  put_digit(13, 16, (byte)(demo_rec_n % 10), 0x0F);
+  put_string(7, 18, "RAM 4CB0", 0x0F);
+}
+#endif /* ATTRACT_RECORD */
+
+#ifndef ATTRACT_RECORD
+/* First key of the repeating block (DIR_LEFT after tunnel outro). */
+#define ATTRACT_PATH_LOOP  34
+
+/* Placeholder times every 40f — replace with real frames as you tune. */
+static const DemoKey attract_path[] = {
+  /* intro (incl. post-tunnel outro) */
+  {    0, DIR_LEFT },
+  {   40, DIR_DOWN },
+  {   80, DIR_RIGHT },
+  {  120, DIR_DOWN },
+  {  160, DIR_RIGHT },
+  {  200, DIR_UP },
+  {  240, DIR_LEFT },
+  {  280, DIR_UP },
+  {  320, DIR_RIGHT },
+  {  360, DIR_UP },
+  {  400, DIR_LEFT },
+  {  440, DIR_UP },
+  {  480, DIR_LEFT },
+  {  520, DIR_DOWN },
+  {  560, DIR_LEFT },
+  {  600, DIR_UP },
+  {  640, DIR_LEFT },
+  {  680, DIR_DOWN },
+  {  720, DIR_RIGHT },
+  {  760, DIR_UP },
+  {  800, DIR_LEFT },
+  {  840, DIR_DOWN },
+  {  880, DIR_LEFT },
+  {  920, DIR_UP },
+  {  960, DIR_RIGHT },
+  { 1000, DIR_DOWN },
+  { 1040, DIR_RIGHT },
+  { 1080, DIR_DOWN },
+  { 1120, DIR_LEFT },
+  { 1160, DIR_DOWN },
+  { 1200, DIR_LEFT },
+  /* after tunnel */
+  { 1240, DIR_DOWN },
+  { 1280, DIR_RIGHT },
+  { 1320, DIR_DOWN },
+  /* repeat */
+  { 1360, DIR_LEFT },
+  { 1400, DIR_UP },
+  { 1440, DIR_RIGHT },
+  { 1480, DIR_UP },
+  { 1520, DIR_LEFT },
+  { 1560, DIR_UP },
+  { 1600, DIR_RIGHT },
+  { 1640, DIR_DOWN },
+  { 1680, DIR_RIGHT },
+  { 1720, DIR_UP },
+  { 1760, DIR_RIGHT },
+  { 1800, DIR_DOWN },
+  { 1840, DIR_LEFT },
+  { 1880, DIR_DOWN },
+  { 1920, DIR_RIGHT },
+  { 1960, DIR_DOWN },
+  { 2000, DEMO_REP },
+  { DEMO_END, 0 }
+};
+
+static word demo_t;
+static byte demo_i;
+
+static void demo_steer(void) {
+  for (;;) {
+    const DemoKey* n = &attract_path[demo_i + 1];
+    if (n->when == DEMO_END)
+      break;
+    if (demo_t < n->when)
+      break;
+    if (n->dir == DEMO_REP) {
+      demo_i = ATTRACT_PATH_LOOP;
+      demo_t = attract_path[demo_i].when;
+      break;
+    }
+    demo_i++;
+  }
+  pac_want = attract_path[demo_i].dir;
+}
+#endif /* !ATTRACT_RECORD */
+
+void start_round(byte player_one);
+void show_death(void);
+void show_game_over(void);
+
+static byte attract_maze_demo(void) {
+  attract_demo = 1;
+  attract_corridor = 0;
+  sound_enable = 0; /* hard mute — no WSG at all */
+  lives = 1;
+  level = 0;
+  score = 0;
+  game_over = 0;
+  global_dot_mode = 0;
+  global_dot_counter = 0;
+  clrscr(0);
+  start_round(1);
+#ifdef ATTRACT_RECORD
+  demo_rec_begin(); /* timer = 0, seed LEFT */
+#else
+  demo_t = 0;
+  demo_i = 0;
+  pac_want = attract_path[0].dir;
+#endif
+
+  while (!(START1 && credits)) {
+    wait_vblank();
+    watchdog = 0;
+    anim_ticks++;
+    tick++;
+    poll_credit();
+
+    if (freeze_ticks) {
+      freeze_ticks--;
+      update_ambient();
+      draw_hud();
+      flash_1up();
+      flash_power_pills(1);
+      actors_draw();
+      continue;
+    }
+
+#ifdef ATTRACT_RECORD
+    demo_rec_sample();
+#else
+    demo_steer();
+#endif
+    pac_update();
+    ghosts_update();
+    demo_t++;
+
+    if (check_ghost_hits()) {
+      show_death();
+#ifdef ATTRACT_RECORD
+      demo_rec_finish();
+      /* Hold so you can dump RAM 4CB0; START (with credit) exits. */
+      while (!(START1 && credits)) {
+        wait_vblank();
+        watchdog = 0;
+        poll_credit();
+      }
+      attract_demo = 0;
+      sound_enable = 1;
+      sfx_off();
+      return 1;
+#else
+      show_game_over();
+      attract_demo = 0;
+      sound_enable = 1;
+      sfx_off();
+      return 0;
+#endif
+    }
+
+    if (power_ticks) power_ticks--;
+    update_ambient();
+    draw_hud();
+    flash_1up();
+    flash_power_pills(1);
+    actors_draw();
+#ifdef ATTRACT_RECORD
+    /* Live key count while training */
+    put_digit(25, 0, (byte)(demo_rec_n / 100), 0x0F);
+    put_digit(26, 0, (byte)((demo_rec_n / 10) % 10), 0x0F);
+    put_digit(27, 0, (byte)(demo_rec_n % 10), 0x0F);
+#endif
+  }
+
+  attract_demo = 0;
+  sound_enable = 1;
+  sfx_off();
+  return 1;
 }
 
 static void attract_draw_pts_legend(void) {
@@ -543,12 +820,14 @@ static void attract_draw_pts_legend(void) {
 void title_screen(void) {
   word t;
   byte i, y, pal;
-  byte chase_done = 0;
+  byte chase_done;
 
+restart_attract:
   clrscr(0);
   hide_all_sprites();
   sfx_off();
   attract_demo = 0;
+  attract_corridor = 0;
   coin_was_down = COIN1 ? 1 : 0;
 
   /* Player score shows 00 on attract; keep hiscore. */
@@ -559,7 +838,8 @@ void title_screen(void) {
   draw_credits();
 
   t = 0;
-  /* Intro + chase; START with credits leaves. */
+  chase_done = 0;
+  /* Intro → chase → maze demo; START with credits leaves. */
   while (!(START1 && credits)) {
     wait_vblank();
     watchdog = 0;
@@ -609,10 +889,11 @@ void title_screen(void) {
       if (t != 0xFFFF) t++;
     } else if (!chase_done) {
       attract_chase();
-      chase_done = 1;
-      /* Demo over — placeholder for maze attract; wait for START. */
-    } else {
-      poll_credit();
+      if (START1 && credits) break;
+      /* Maze demo: death → replay title; START+credit → play. */
+      if (!attract_maze_demo())
+        goto restart_attract;
+      break;
     }
   }
 
@@ -623,6 +904,7 @@ void title_screen(void) {
   }
   if (credits) credits--;
   attract_demo = 0;
+  attract_corridor = 0;
   sfx_off();
 }
 
@@ -631,16 +913,20 @@ void show_death(void) {
   byte i;
   word timeout;
   for (i = 1; i < 8; i++) hide_sprite(i);
-  play_sfx(4);
+  if (!attract_demo)
+    play_sfx(4);
   for (t = 0; t < 88; t++) {
     frame = (byte)(SP_DEATH0 + (t >> 3));
     if (frame > SP_DEATH_LAST) frame = SP_DEATH_LAST;
-    set_sprite_ex(0, frame, PAL_YELLOW, (byte)(pac_x - 8), (byte)(pac_y - 8), 0);
+    set_sprite_ex(0, frame, PAL_YELLOW,
+                  (byte)((pac_tx << 3) + pac_ox - 8),
+                  (byte)((pac_ty << 3) + pac_oy - 8), 0);
     wait_vblank();
     watchdog = 0;
-    if (t == 72) CH3_E_NUM = 0x20;
+    if (!attract_demo && t == 72) CH3_E_NUM = 0x20;
   }
   hide_sprite(0);
+  if (attract_demo) return;
   /* Wait for coda bits to clear — timeout if engine missed a frame. */
   timeout = 180;
   while ((CH3_E_NUM & 0x20) && timeout--) {
@@ -675,7 +961,10 @@ void start_round(byte player_one) {
   hud_ready = 0;
   draw_hud();
   sfx_off(); /* silent through READY; ambient starts when play resumes */
-  show_ready_banner(player_one);
+  if (attract_demo)
+    actors_draw(); /* maze attract: no PLAYER/READY — just go */
+  else
+    show_ready_banner(player_one);
 }
 
 void next_level(void) {
@@ -759,9 +1048,15 @@ void main(void) {
   sfx_off(); /* arms pac_vblank_hook + clears WSG */
   pac_irq_enable();
 
+  /* ATTRACT_DEV / ATTRACT_RECORD: maze demo loop. Else: title → play. */
+#if defined(ATTRACT_DEV) || defined(ATTRACT_RECORD)
+  while (1)
+    attract_maze_demo();
+#else
   while (1) {
     title_screen();
     game_loop();
     show_game_over();
   }
+#endif
 }

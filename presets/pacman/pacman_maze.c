@@ -68,41 +68,45 @@ static byte mirror_tile(byte t) {
   return (byte)(t ^ 1);
 }
 
-static byte maze_src(byte row, byte col) {
-  byte lc = col;
-  byte t;
-  if (col >= MAZE_HALF) lc = (byte)(27 - col);
-  t = maze_left[(word)row * MAZE_HALF + lc];
-  if (col >= MAZE_HALF) t = mirror_tile(t);
-  return t;
-}
-
+/*
+ * Fast draw: walk left half once; L/R VRAM pointers step ±32 (one strip).
+ * Color is almost always PAL_MAZE — only the ghost-house door uses PAL_DOOR.
+ */
+#pragma opt_code_speed
 void draw_maze(void) {
-  byte strip; /* 0 = screen x=27 … 27 = screen x=0 */
-  for (strip = 0; strip < 28; strip++) {
-    byte x = (byte)(27 - strip);
-    byte row;
-    /* Skip strip offset 0 (screen y=2, above maze); write offsets 1..31. */
-    byte* v = VRAM_MID + (word)strip * 32 + 1;
-    byte* c = CRAM_MID + (word)strip * 32 + 1;
+  const byte* src = maze_left;
+  byte row;
+
+  for (row = 0; row < MAZE_ROWS; row++) {
+    byte col;
+    byte yoff = (byte)(row + 1); /* strip byte: screen y = row+3 → y-2 */
+    /* x=0 → strip 27; x=27 → strip 0 */
+    byte* vl = VRAM_MID + (word)(27 * 32) + yoff;
+    byte* vr = VRAM_MID + yoff;
+    byte* cl = CRAM_MID + (word)(27 * 32) + yoff;
+    byte* cr = CRAM_MID + yoff;
+
     watchdog = 0;
-    for (row = 0; row < MAZE_ROWS; row++) {
-      byte tile = maze_src(row, x);
-      *v++ = tile;
-      *c++ = (tile == T_DOOR) ? PAL_DOOR : PAL_MAZE;
+    for (col = 0; col < MAZE_HALF; col++) {
+      byte tile = *src++;
+      byte mt = mirror_tile(tile);
+      byte pal = (tile == T_DOOR) ? PAL_DOOR : PAL_MAZE;
+
+      *vl = tile;
+      *cl = pal;
+      *vr = mt;
+      *cr = (mt == T_DOOR) ? PAL_DOOR : PAL_MAZE;
+
+      vl -= 32; cl -= 32;
+      vr += 32; cr += 32;
     }
   }
 }
+#pragma opt_code_size
 
 void count_dots(void) {
-  byte row, col, t;
-  dots_left = 0;
-  for (row = 0; row < MAZE_ROWS; row++) {
-    for (col = 0; col < 28; col++) {
-      t = maze_src(row, col);
-      if (t == T_DOT_A || t == T_POWER_A) dots_left++;
-    }
-  }
+  /* Fixed arcade maze — skip recounting via maze_src. */
+  dots_left = NUM_DOTS;
   dots_eaten = 0;
   elroy = 0;
 }
@@ -111,8 +115,24 @@ byte maze_tile(byte tx, byte ty) {
   return peek_tile(tx, ty);
 }
 
+/* Mid-band VRAM (screen y=2..33): strip (27-tx) × 32 + (ty-2).
+ * Use an explicit word offset — SDCC miscompiles the pointer form of
+ * `((word)(27-tx)<<5)` as a byte rotate (wrong for strip ≥ 8). */
+byte peek_maze(byte tx, byte ty) {
+  word off = ((word)(27 - tx) << 5) + (byte)(ty - 2);
+  return VRAM_MID[off];
+}
+
+void poke_maze(byte tx, byte ty, byte tile, byte pal) {
+  word off = ((word)(27 - tx) << 5) + (byte)(ty - 2);
+  VRAM_MID[off] = tile;
+  CRAM_MID[off] = pal;
+}
+
 byte tile_blocked(byte tx, byte ty) {
   if (tx >= 28 || ty >= 36) return 1;
+  if (ty >= 2 && ty < 34)
+    return peek_maze(tx, ty) >= 0xC0;
   return peek_tile(tx, ty) >= 0xC0;
 }
 
@@ -149,21 +169,26 @@ word fright_flash_ticks(void) {
 
 void try_eat_tile(byte tx, byte ty) {
   byte t;
+  byte is_dot;
   if (tx >= 28 || ty >= 36) return;
-  t = peek_tile(tx, ty);
+  t = peek_maze(tx, ty);
   if (t != T_DOT_A && t != T_POWER_A) return;
+  is_dot = (byte)(t == T_DOT_A);
 
-  poke_tile(tx, ty, T_BLANK_A, 0);
+  poke_maze(tx, ty, T_BLANK_A, 0);
   if (dots_left) dots_left--;
   dots_eaten++;
-  force_house = 0; /* [CONFIRM] eating a dot resets house force-exit timer */
+  /* Dossier: only regular dots reset force-exit / feed house counters.
+   * Energizers do not. */
+  if (is_dot)
+    force_house = 0;
 
   if (t == T_POWER_A) {
     byte i;
     play_sfx(6);
     power_ticks = fright_duration(); /* [CHANGE] full A.1; may be 0 */
     eat_combo = 0;
-    score += 5;
+    if (!attract_demo) score += 5;
     pac_stop = 3; /* [CONFIRM] dossier: 3-frame pause on energizer */
     /* [CONFIRM] fright on ALL ghosts; reverse maze ghosts (even if duration 0) */
     for (i = 0; i < GHOST_N; i++) {
@@ -178,7 +203,7 @@ void try_eat_tile(byte tx, byte ty) {
   } else {
     waka ^= 1;
     play_sfx(waka ? 1 : 2);
-    score += 1;
+    if (!attract_demo) score += 1;
     pac_stop = 1; /* [CONFIRM] dossier: 1-frame pause on dot */
   }
 
@@ -187,6 +212,9 @@ void try_eat_tile(byte tx, byte ty) {
     fruit_visible = (word)(540 + (rand8() & 63));
 
   update_elroy();
+
+  /* House / global counters: regular dots only (dossier §ghost house). */
+  if (!is_dot) return;
 
   if (global_dot_mode) {
     /* [CONFIRM] after death, global counter; Clyde@32 deactivates it */

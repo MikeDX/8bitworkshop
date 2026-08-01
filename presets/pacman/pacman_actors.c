@@ -44,7 +44,8 @@
  *  [CONFIRM] Only one personal counter active; preference Pinky→Inky→Clyde
  *  [CONFIRM] After death: global counter 7/17/32; personal kept (not reset)
  *  [CHANGE]  Force-exit timer: 4s L1–4, 3s L5+; only ONE preferred ghost
- *  [CONFIRM] Eating a dot resets the force-exit timer
+ *  [CONFIRM] Eating a regular dot resets the force-exit timer (not energizers)
+ *  [CONFIRM] House/global counters increment on regular dots only
  *
  * CRUISE ELROY (Blinky)
  *  [CHANGE]  Dot thresholds from Table A.1 (was fixed 20/10)
@@ -161,24 +162,23 @@ byte opposite_dir(byte d) {
   return opp_dir[d];
 }
 
-byte tile_x(word px) { return (byte)(px >> 3); }
-byte tile_y(word py) { return (byte)(py >> 3); }
-
 /*
- * Dossier speeds as 8.8 fixed-point (100% = 0x140 ≈ 1.25 px/frame).
+ * Dossier Table A.1: 100% = 75.75757625 px/s @ 60Hz → 1.262626… px/frame.
+ * 8.8 fixed-point: round(pct/100 * 75.75757625/60 * 256).
  */
-#define SP_40   0x0080
-#define SP_45   0x0090
-#define SP_50   0x00A0
-#define SP_55   0x00B0
-#define SP_60   0x00C0
-#define SP_75   0x00F0
-#define SP_80   0x0100
-#define SP_85   0x0110
-#define SP_90   0x0120
-#define SP_95   0x0130
-#define SP_100  0x0140
-#define SP_150  0x01E0
+#define SP_40   0x0081  /* 40% */
+#define SP_45   0x0091
+#define SP_50   0x00A2
+#define SP_55   0x00B2
+#define SP_60   0x00C2
+#define SP_75   0x00F2  /* ghost cruise L1 */
+#define SP_80   0x0103  /* Pac L1 */
+#define SP_85   0x0113
+#define SP_90   0x0123
+#define SP_95   0x0133
+#define SP_100  0x0143
+#define SP_150  0x01E5  /* eyes */
+#define SP_ELROY2_BONUS 0x0010  /* +5% of max ≈ Elroy2 vs Elroy1 */
 
 /* File-scope const — stays in CODE (not INITIALIZED). */
 static const word spd_fright_pac[3] = { SP_90, SP_95, SP_100 };
@@ -204,18 +204,15 @@ word pac_speed_fp(void) {
 word ghost_speed_fp(Ghost* g) {
   byte mode = g->mode;
   byte b = level_band();
-  byte tx, ty;
 
   if (mode == MODE_HOUSE || mode == MODE_LEAVE) return SP_50; /* [CONFIRM] */
   if (mode == MODE_FRIGHT) return spd_fright_g[b];
   if (mode == MODE_EYES || mode == MODE_ENTER) return SP_150; /* [CONFIRM] */
-  ty = (byte)(g->y >> 3);
-  tx = (byte)(g->x >> 3);
   /* [CONFIRM] tunnel slowdown on y=17, x<=5 or x>=22 */
-  if (ty == 17 && (tx <= 5 || tx >= 22)) return spd_tunnel_g[b];
+  if (g->ty == 17 && (g->tx <= 5 || g->tx >= 22)) return spd_tunnel_g[b];
   if (g == ghosts) {
     /* [CONFIRM] Elroy1 = Pac speed; Elroy2 = Pac + ~5% */
-    if (elroy == 2) return (word)(pac_speed_fp() + 0x0010);
+    if (elroy == 2) return (word)(pac_speed_fp() + SP_ELROY2_BONUS);
     if (elroy == 1) return pac_speed_fp();
   }
   return spd_cruise_g[b];
@@ -223,10 +220,8 @@ word ghost_speed_fp(Ghost* g) {
 
 word ghost_speed_cached(Ghost* g) {
   byte sig = g->mode;
-  byte ty = (byte)(g->y >> 3);
-  if (ty == 17) {
-    byte tx = (byte)(g->x >> 3);
-    if (tx <= 5 || tx >= 22) sig |= 0x80;
+  if (g->ty == 17) {
+    if (g->tx <= 5 || g->tx >= 22) sig |= 0x80;
   }
   if (g == ghosts) sig |= (byte)(elroy << 4);
   if (sig != g->speed_sig) {
@@ -237,29 +232,28 @@ word ghost_speed_cached(Ghost* g) {
 }
 
 #pragma opt_code_speed
-/* floooh can_move — Pac allows cornering. */
-byte can_move(word px, word py, byte dir, byte cornering) {
+/* floooh can_move — Pac allows cornering. pos = {tx,ty,ox,oy}. */
+byte can_move(byte* pos, byte dir, byte cornering) {
   sbyte dx, dy;
   sbyte move_mid, perp_mid;
-  byte tx, ty, nx, ny;
+  byte nx, ny;
+  byte tx = pos[0], ty = pos[1], ox = pos[2], oy = pos[3];
 
   if (dir == DIR_NONE || dir > 4) return 0;
   dx = dir_dx[dir];
   dy = dir_dy[dir];
 
   if (dy != 0) {
-    move_mid = (sbyte)(4 - (byte)(py & 7));
-    perp_mid = (sbyte)(4 - (byte)(px & 7));
+    move_mid = (sbyte)(4 - oy);
+    perp_mid = (sbyte)(4 - ox);
   } else {
-    move_mid = (sbyte)(4 - (byte)(px & 7));
-    perp_mid = (sbyte)(4 - (byte)(py & 7));
+    move_mid = (sbyte)(4 - ox);
+    perp_mid = (sbyte)(4 - oy);
   }
 
   if (!cornering && perp_mid != 0) return 0;
   if (move_mid != 0) return 1;
 
-  tx = (byte)(px >> 3);
-  ty = (byte)(py >> 3);
   nx = (byte)((sbyte)tx + dx);
   ny = (byte)((sbyte)ty + dy);
 
@@ -270,48 +264,55 @@ byte can_move(word px, word py, byte dir, byte cornering) {
 }
 
 #pragma opt_code_size
-void move_pos(word* px, word* py, byte dir, byte cornering) {
-  sbyte dx, dy;
-  if (dir < 1 || dir > 4) return;
-  dx = dir_dx[dir];
-  dy = dir_dy[dir];
-  if (dx) {
-    word x = *px;
-    if (dx < 0) {
-      if (x) x--; else x = 223;
-    } else {
-      x++;
-      if (x >= 224) x = 0;
+/* One-pixel step. pos = {tx,ty,ox,oy} (Ghost / pac_*). */
+void move_pos(byte* pos, byte dir) {
+  byte* t;
+  byte* o;
+  byte horiz;
+
+  if (dir < DIR_RIGHT || dir > DIR_UP) return;
+  horiz = (byte)(dir == DIR_LEFT || dir == DIR_RIGHT);
+  if (horiz) { t = pos; o = pos + 2; }
+  else { t = pos + 1; o = pos + 3; }
+
+  if (dir == DIR_LEFT || dir == DIR_UP) {
+    if (*o) (*o)--;
+    else if (*t) { (*t)--; *o = 7; }
+    else if (horiz) { *t = 27; *o = 7; } /* tunnel wrap L only */
+  } else {
+    (*o)++;
+    if (*o >= 8) {
+      *o = 0;
+      (*t)++;
+      if (horiz && *t >= 28) *t = 0; /* tunnel wrap R */
     }
-    *px = x;
-  } else {
-    *py = (word)(*py + dy);
   }
-  if (!cornering) return;
-  if (dx) {
-    byte m = (byte)(*py) & 7;
-    if (m < 4) (*py)++;
-    else if (m > 4) (*py)--;
-  } else {
-    byte m = (byte)(*px) & 7;
-    if (m < 4) (*px)++;
-    else if (m > 4) (*px)--;
-  }
+}
+
+/* Pac: step then ease perpendicular offset toward 4. */
+void move_pos_pac(byte* pos, byte dir) {
+  byte* o;
+  move_pos(pos, dir);
+  if (dir == DIR_LEFT || dir == DIR_RIGHT) o = pos + 3;
+  else if (dir == DIR_UP || dir == DIR_DOWN) o = pos + 2;
+  else return;
+  if (*o < 4) (*o)++;
+  else if (*o > 4) (*o)--;
 }
 
 #pragma opt_code_size
 /* ---- ghost AI (dossier) ---- */
 
-/* tileΔ² for pathfinding / Clyde (0..31). Avoids __mulint. */
-static const word tile_sqr[32] = {
-  0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 169, 196, 225,
-  256, 289, 324, 361, 400, 441, 484, 529, 576, 625, 676, 729, 784, 841, 900, 961
-};
-
-static word dist2_tiles(byte ax, byte ay) {
-  if (ax > 31) ax = 31;
-  if (ay > 31) ay = 31;
-  return (word)(tile_sqr[ax] + tile_sqr[ay]);
+/* Squared Euclidean to a (possibly off-map) target. Arcade uses signed tile
+ * math — byte abs_diff + clamp-to-31 made Pinky/Inky off-map targets all look
+ * equally far, so dirs_pref ties picked the wrong turn. */
+static word dist2_to(sbyte x, sbyte y, sbyte tx, sbyte ty) {
+  int dx = (int)x - (int)tx;
+  int dy = (int)y - (int)ty;
+  if (dx < 0) dx = -dx;
+  if (dy < 0) dy = -dy;
+  /* Tile deltas stay well under 128 for this maze. */
+  return (word)(dx * dx + dy * dy);
 }
 
 /* Scatter/chase phase ends (frames). L1 / L2–4 / L5+. Index 0..6 = S C S C S C S. */
@@ -339,7 +340,11 @@ static byte scatter_chase_mode(void) {
 }
 
 /* Target tile for current ghost AI decision (avoids pointer out-params). */
-static byte ai_tx, ai_ty;
+static sbyte ai_tx, ai_ty;
+
+/* Last computed targets — for GHOST_AI_DEBUG overlay. */
+sbyte ghost_ai_tx[GHOST_N];
+sbyte ghost_ai_ty[GHOST_N];
 
 /* Prefer order for chase/scatter; clockwise order for fright. */
 static const byte dirs_pref[4] = { DIR_UP, DIR_LEFT, DIR_DOWN, DIR_RIGHT };
@@ -347,8 +352,8 @@ static const byte dirs_cw[4] = { DIR_UP, DIR_RIGHT, DIR_DOWN, DIR_LEFT };
 
 static void ghost_target(byte i) {
   Ghost* g = &ghosts[i];
-  byte ptx = (byte)(pac_x >> 3);
-  byte pty = (byte)(pac_y >> 3);
+  sbyte ptx = (sbyte)pac_tx;
+  sbyte pty = (sbyte)pac_ty;
   byte pd = pac_dir;
   sbyte pdx, pdy;
   byte mode = g->mode;
@@ -361,50 +366,52 @@ static void ghost_target(byte i) {
       mode == MODE_HOUSE) {
     ai_tx = 13;
     ai_ty = 14;
-    return;
-  }
-
-  if (mode == MODE_SCATTER) {
+  } else if (mode == MODE_SCATTER) {
     if (i == 0 && elroy) {
       ai_tx = ptx;
       ai_ty = pty;
     } else {
-      ai_tx = scat_x[i];
-      ai_ty = scat_y[i];
+      ai_tx = (sbyte)scat_x[i];
+      ai_ty = (sbyte)scat_y[i];
     }
-    return;
-  }
-
-  /* MODE_CHASE (fright uses PRNG path, not targets) */
-  if (i == 0) {
+  } else if (mode == MODE_FRIGHT) {
+    /* Fright has no tile target — park marker on ghost. */
+    ai_tx = (sbyte)g->tx;
+    ai_ty = (sbyte)g->ty;
+  } else if (i == 0) {
+    /* MODE_CHASE */
     ai_tx = ptx;
     ai_ty = pty;
   } else if (i == 1) {
     /* Pinky: 4 ahead; UP also −4 X */
-    ai_tx = (byte)((sbyte)ptx + (sbyte)(pdx << 2));
-    ai_ty = (byte)((sbyte)pty + (sbyte)(pdy << 2));
+    ai_tx = (sbyte)(ptx + (sbyte)(pdx << 2));
+    ai_ty = (sbyte)(pty + (sbyte)(pdy << 2));
     if (pd == DIR_UP)
-      ai_tx = (byte)((sbyte)ai_tx - 4);
+      ai_tx = (sbyte)(ai_tx - 4);
   } else if (i == 2) {
-    /* Inky: 2 ahead (UP bug), then 2×(that − Blinky) */
-    byte bx = (byte)(ghosts[0].x >> 3);
-    byte by = (byte)(ghosts[0].y >> 3);
-    sbyte px2 = (sbyte)(ptx + (sbyte)(pdx << 1));
-    sbyte py2 = (sbyte)(pty + (sbyte)(pdy << 1));
-    if (pd == DIR_UP) px2 = (sbyte)(px2 - 2);
-    ai_tx = (byte)(bx + (sbyte)((px2 - (sbyte)bx) << 1));
-    ai_ty = (byte)(by + (sbyte)((py2 - (sbyte)by) << 1));
+    /* Inky: pivot 2 ahead of Pac (UP also −2 X), target = 2*pivot − Blinky */
+    sbyte pivx, pivy;
+    sbyte bx = (sbyte)ghosts[0].tx;
+    sbyte by = (sbyte)ghosts[0].ty;
+    pivx = (sbyte)(ptx + (sbyte)(pdx << 1));
+    pivy = (sbyte)(pty + (sbyte)(pdy << 1));
+    if (pd == DIR_UP)
+      pivx = (sbyte)(pivx - 2);
+    ai_tx = (sbyte)(pivx + (pivx - bx));
+    ai_ty = (sbyte)(pivy + (pivy - by));
   } else {
-    /* Clyde */
-    if (dist2_tiles(abs_diff((byte)(g->x >> 3), ptx),
-                    abs_diff((byte)(g->y >> 3), pty)) > 64) {
+    /* Clyde: chase if Euclidean² > 64 (exactly 8 → scatter, dossier) */
+    if (dist2_to((sbyte)g->tx, (sbyte)g->ty, ptx, pty) > 64) {
       ai_tx = ptx;
       ai_ty = pty;
     } else {
-      ai_tx = scat_x[i];
-      ai_ty = scat_y[i];
+      ai_tx = (sbyte)scat_x[i];
+      ai_ty = (sbyte)scat_y[i];
     }
   }
+
+  ghost_ai_tx[i] = ai_tx;
+  ghost_ai_ty[i] = ai_ty;
 }
 
 /* 1 if dir is open from lookahead tile (not reverse, not blocked). */
@@ -413,7 +420,10 @@ static byte dir_open(byte lx, byte ly, byte d, byte gdir) {
   if (opp_dir[d] == gdir) return 0;
   nx = (byte)((sbyte)lx + dir_dx[d]);
   ny = (byte)((sbyte)ly + dir_dy[d]);
-  if (nx >= 28 || ny >= 36) return 0;
+  /* Tunnel wrap (same as can_move / move_pos) — else AI rejects exits. */
+  if ((sbyte)((sbyte)lx + dir_dx[d]) < 0) nx = 27;
+  else if (nx >= 28) nx = 0;
+  if (ny >= 36) return 0;
   return !tile_blocked(nx, ny);
 }
 
@@ -422,35 +432,45 @@ byte update_ghost_dir(byte i) {
   byte di, d, best, gdir, lx, ly, mode;
 
   mode = g->mode;
+  ghost_target(i); /* always refresh ghost_ai_tx/ty (debug overlay) */
 
   if (mode == MODE_HOUSE) {
-    if (g->y <= (word)(17 * 8)) g->next_dir = DIR_DOWN;
-    else if (g->y >= (word)(18 * 8)) g->next_dir = DIR_UP;
+    /* bounce between y=17*8 and 18*8 */
+    if (g->ty < 17 || (g->ty == 17 && g->oy == 0))
+      g->next_dir = DIR_DOWN;
+    else if (g->ty >= 18)
+      g->next_dir = DIR_UP;
     g->dir = g->next_dir;
     return 1;
   }
 
   if (mode == MODE_LEAVE) {
-    if (g->x == ANTE_X) {
-      if (g->y > ANTE_Y) g->next_dir = DIR_UP;
+    if (g->tx == ANTE_TX && g->ox == ANTE_OX) {
+      if (g->ty > ANTE_TY || (g->ty == ANTE_TY && g->oy > ANTE_OY))
+        g->next_dir = DIR_UP;
     } else {
-      word mid_y = (word)(17 * 8 + 4);
-      if (g->y > mid_y) g->next_dir = DIR_UP;
-      else if (g->y < mid_y) g->next_dir = DIR_DOWN;
-      else g->next_dir = (g->x > ANTE_X) ? DIR_LEFT : DIR_RIGHT;
+      /* mid_y = 17*8+4 → ty=17, oy=4 */
+      if (g->ty > 17 || (g->ty == 17 && g->oy > 4))
+        g->next_dir = DIR_UP;
+      else if (g->ty < 17 || (g->ty == 17 && g->oy < 4))
+        g->next_dir = DIR_DOWN;
+      else
+        g->next_dir = (g->tx > ANTE_TX ||
+                       (g->tx == ANTE_TX && g->ox > ANTE_OX))
+                        ? DIR_LEFT : DIR_RIGHT;
     }
     g->dir = g->next_dir;
     return 1;
   }
 
   if (mode == MODE_ENTER) {
-    if ((byte)(g->x >> 3) == 14 || g->x == ANTE_X) {
-      if (g->x != ANTE_X)
-        g->next_dir = (g->x < ANTE_X) ? DIR_RIGHT : DIR_LEFT;
+    if (g->tx == ANTE_TX) {
+      if (g->ox != ANTE_OX)
+        g->next_dir = (g->ox < ANTE_OX) ? DIR_RIGHT : DIR_LEFT;
       else
         g->next_dir = DIR_DOWN;
-    } else if ((byte)(g->y >> 3) == 14) {
-      g->next_dir = (g->x < ANTE_X) ? DIR_RIGHT : DIR_LEFT;
+    } else if (g->ty == 14) {
+      g->next_dir = (g->tx < ANTE_TX) ? DIR_RIGHT : DIR_LEFT;
     } else {
       g->next_dir = DIR_DOWN;
     }
@@ -458,13 +478,13 @@ byte update_ghost_dir(byte i) {
     return 1;
   }
 
-  if (!AT_TILE_MID(g->x, g->y)) return 0;
+  if (!AT_TILE_MID(g->ox, g->oy)) return 0;
 
   gdir = g->next_dir;
   if (gdir > 4) gdir = DIR_RIGHT;
   g->dir = gdir;
-  lx = (byte)((sbyte)(g->x >> 3) + dir_dx[gdir]);
-  ly = (byte)((sbyte)(g->y >> 3) + dir_dy[gdir]);
+  lx = (byte)((sbyte)g->tx + dir_dx[gdir]);
+  ly = (byte)((sbyte)g->ty + dir_dy[gdir]);
 
   if (mode == MODE_FRIGHT) {
     byte start = (byte)(rand8() & 3);
@@ -480,20 +500,23 @@ byte update_ghost_dir(byte i) {
     return 0;
   }
 
-  ghost_target(i);
   best = gdir;
   {
     word best_dist = 0xffff;
     for (di = 0; di < 4; di++) {
       word dist;
+      sbyte nx, ny;
       d = dirs_pref[di];
       if (d == DIR_UP && mode != MODE_EYES &&
           lx >= 11 && lx <= 16 && (ly == 14 || ly == 26))
         continue;
       if (!dir_open(lx, ly, d, gdir)) continue;
-      dist = dist2_tiles(
-        abs_diff((byte)((sbyte)lx + dir_dx[d]), ai_tx),
-        abs_diff((byte)((sbyte)ly + dir_dy[d]), ai_ty));
+      /* Destination tile (tunnel-wrap X) vs signed target. */
+      nx = (sbyte)((sbyte)lx + dir_dx[d]);
+      ny = (sbyte)((sbyte)ly + dir_dy[d]);
+      if (nx < 0) nx = 27;
+      else if (nx >= 28) nx = 0;
+      dist = dist2_to(nx, ny, ai_tx, ai_ty);
       if (dist < best_dist) {
         best_dist = dist;
         best = d;
@@ -511,12 +534,13 @@ void update_ghost_state(byte i) {
 
   switch (mode) {
   case MODE_EYES:
-    if (abs_diff((byte)g->x, ANTE_X) <= 1 &&
-        abs_diff((byte)g->y, ANTE_Y) <= 1)
+    /* within 1px of ante (112,116) */
+    if (g->tx == ANTE_TX && g->ox <= 1 &&
+        g->ty == ANTE_TY && abs_diff(g->oy, ANTE_OY) <= 1)
       new_mode = MODE_ENTER;
     break;
   case MODE_ENTER:
-    if ((byte)(g->y >> 3) >= 17)
+    if (g->ty >= 17)
       new_mode = MODE_LEAVE;
     break;
   case MODE_HOUSE:
@@ -535,7 +559,9 @@ void update_ghost_state(byte i) {
     }
     break;
   case MODE_LEAVE:
-    if (g->y == ANTE_Y)
+    /* Must reach door pixel (14,14)+ox0/oy4 — not just ante row. */
+    if (g->tx == ANTE_TX && g->ox == ANTE_OX &&
+        g->ty == ANTE_TY && g->oy == ANTE_OY)
       new_mode = g->frightened ? MODE_FRIGHT : phase_mode;
     break;
   default:
@@ -564,3 +590,57 @@ void update_ghost_state(byte i) {
     }
   }
 }
+
+#if GHOST_AI_DEBUG
+/* Color-only overlays are invisible on blank path tiles — stamp glyphs. */
+static byte dbg_tx[GHOST_N + 1], dbg_ty[GHOST_N + 1];
+static byte dbg_tile[GHOST_N + 1], dbg_pal[GHOST_N + 1], dbg_on[GHOST_N + 1];
+static const char dbg_mark[GHOST_N + 1] = { 'B', 'P', 'I', 'C', 'Y' }; /* +Pac */
+
+void ghost_ai_capture_targets(void) {
+  byte i;
+  for (i = 0; i < GHOST_N; i++)
+    ghost_target(i);
+}
+
+static byte dbg_clamp_s(sbyte v, byte lim) {
+  if (v < 0) return 0;
+  if ((byte)v >= lim) return (byte)(lim - 1);
+  return (byte)v;
+}
+
+static void dbg_restore(byte i) {
+  if (!dbg_on[i]) return;
+  poke_tile(dbg_tx[i], dbg_ty[i], dbg_tile[i], dbg_pal[i]);
+  dbg_on[i] = 0;
+}
+
+static void dbg_stamp(byte i, sbyte stx, sbyte sty, byte pal) {
+  word a;
+  byte tx = dbg_clamp_s(stx, 28);
+  byte ty = dbg_clamp_s(sty, 36);
+  a = vram_addr(tx, ty);
+  dbg_tx[i] = tx;
+  dbg_ty[i] = ty;
+  dbg_tile[i] = *((byte*)(0x4000 + a));
+  dbg_pal[i] = *((byte*)(0x4400 + a));
+  dbg_on[i] = 1;
+  poke_tile(tx, ty, (byte)dbg_mark[i], pal);
+}
+
+void draw_ghost_ai_debug(void) {
+  byte i;
+
+  ghost_ai_capture_targets();
+
+  for (i = 0; i <= GHOST_N; i++)
+    dbg_restore(i);
+
+  /* Pac tile we think he's on — yellow Y */
+  dbg_stamp(GHOST_N, (sbyte)pac_tx, (sbyte)pac_ty, PAL_YELLOW);
+
+  /* Ghost AI targets — B/P/I/C in body colors */
+  for (i = 0; i < GHOST_N; i++)
+    dbg_stamp(i, ghost_ai_tx[i], ghost_ai_ty[i], ghost_pal[i]);
+}
+#endif

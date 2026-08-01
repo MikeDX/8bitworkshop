@@ -99,18 +99,24 @@
 #define NUM_DOTS      244
 #define EAT_FREEZE_TICKS 60
 
-/* floooh anteportas (house exit point), pixel center */
-#define ANTE_X        112  /* 14*8 */
-#define ANTE_Y        116  /* 14*8+4 */
+/* 1 = paint ghost AI target tiles + Pac tile (color RAM). */
+// #define GHOST_AI_DEBUG 1
+
+/* floooh anteportas (house exit): tile + offset in tile */
+#define ANTE_TX       14
+#define ANTE_TY       14
+#define ANTE_OX       0   /* pixel center 112 = 14*8+0 */
+#define ANTE_OY       4   /* pixel center 116 = 14*8+4 */
 
 #define FRUIT_TX      14
 #define FRUIT_TY      20
 
-/* Pixel centers sit on *.4 within a tile when at a decision point. */
-#define AT_TILE_MID(px, py) ((((px) & 7) == 4) && (((py) & 7) == 4))
+/* Decision point: subpixel centers on 4 within the tile. */
+#define AT_TILE_MID(ox, oy) (((ox) == 4) && ((oy) == 4))
 
 typedef struct {
-  word x, y;       /* pixel CENTER */
+  byte tx, ty;     /* tile */
+  byte ox, oy;     /* offset in tile 0..7 (center = 4) */
   word frac;       /* 8.8 movement accumulator */
   word speed_fp;   /* cached 8.8 speed */
   byte dir;
@@ -134,7 +140,8 @@ extern word fruit_ticks;
 extern word fruit_visible;   /* word — 600 frames must not wrap */
 extern word force_house;     /* frames since last dot */
 extern word freeze_ticks;    /* >0: freeze after eating a ghost */
-extern word pac_x, pac_y;
+/* Contiguous — move_pos/can_move take &pac_tx as {tx,ty,ox,oy}. */
+extern byte pac_tx, pac_ty, pac_ox, pac_oy;
 extern word pac_frac;        /* 8.8 movement accumulator */
 
 extern byte lives;
@@ -157,7 +164,8 @@ extern byte tick;
 extern byte pac_stop; /* frames Pac stops after eating */
 extern byte global_dot_mode;
 extern byte global_dot_counter;
-extern byte attract_demo; /* 1 = ignore joystick; pac_want drives Pac */
+extern byte attract_demo;     /* mute SFX + ignore joystick (chase + maze demo) */
+extern byte attract_corridor; /* title chase: X-only Pac; black eaten-ghost eyes */
 extern byte eyes_present; /* cached: any ghost in EYES/ENTER */
 
 extern Ghost ghosts[GHOST_N];

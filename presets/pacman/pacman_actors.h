@@ -10,11 +10,11 @@ void actors_draw(void);
 void actors_draw_anim(byte animate);
 byte check_ghost_hits(void); /* 1 = pac died */
 
-/* Used by pacman_render.c (low CODE) */
-byte tile_x(word px);
-byte tile_y(word py);
-byte can_move(word px, word py, byte dir, byte cornering);
-void move_pos(word* px, word* py, byte dir, byte cornering);
+/* Used by pacman_render.c (low CODE).
+ * pos → {tx,ty,ox,oy} contiguous (Ghost head / pac_tx..pac_oy). */
+byte can_move(byte* pos, byte dir, byte cornering);
+void move_pos(byte* pos, byte dir);           /* no cornering (ghosts) */
+void move_pos_pac(byte* pos, byte dir);       /* + corner toward mid */
 word pac_speed_fp(void);
 word ghost_speed_fp(Ghost* g);
 word ghost_speed_cached(Ghost* g);
@@ -25,5 +25,12 @@ void set_house_limits(void);
 void ghost_frame_begin(void); /* cache scatter/chase for this frame */
 void update_elroy(void);
 
+
+#if GHOST_AI_DEBUG
+extern sbyte ghost_ai_tx[GHOST_N];
+extern sbyte ghost_ai_ty[GHOST_N];
+void ghost_ai_capture_targets(void);
+void draw_ghost_ai_debug(void);
+#endif
 
 #endif
