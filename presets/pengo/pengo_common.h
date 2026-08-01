@@ -8,6 +8,8 @@
  * Optional per-frame work: set pengo_vblank_hook, then pengo_irq_enable().
  *
  * Joystick bits differ from Pac-Man: UP, DOWN, LEFT, RIGHT (MAME pengo IN0).
+ *
+ * VRAM: same pacman_scan_rows map as Pac-Man (disjointed). See vram_addr().
  */
 #ifndef PENGO_COMMON_H
 #define PENGO_COMMON_H
@@ -59,9 +61,23 @@ void pengo_irq_enable(void);
 #define PAL_RED    1
 #define PAL_WHITE  15
 
+/*
+ * Tile coords are upright/cabinet: x=0..27 left→right, y=0..35 top→bottom.
+ *
+ * Pengo shares Pac-Man's pacman_scan_rows VRAM map (MAME). It is NOT a linear
+ * 28×36 grid: top/bottom status rows and the playfield use different strides.
+ *
+ * Cheap axis: along upright Y (MAME col) inside the playfield — consecutive
+ * addresses. Use pf_column()/fill_column() for vertical strips. Horizontal
+ * runs (put_string) jump −32 per tile; that cost is hardware, not fixable.
+ */
 word vram_addr(byte x, byte y);
+/* Playfield only (x=0..27, y=2..33): pointer to 32 linear tiles in that column. */
+byte* pf_column(byte x);
 void poke_tile(byte x, byte y, byte tile, byte pal);
+void poke_pal(byte x, byte y, byte pal);
 byte peek_tile(byte x, byte y);
+void fill_column(byte x, byte y0, byte n, byte tile, byte pal);
 void clrscr(byte pal);
 void wait_vblank(void);
 void put_digit(byte x, byte y, byte d, byte pal);

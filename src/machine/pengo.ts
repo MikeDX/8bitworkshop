@@ -16,6 +16,8 @@ import { padBytes, Keys, makeKeycodeMap, newKeyboardHandler, EmuHalt } from "../
  *   0xC000-0xC01F  color PROM (32)
  *   0xC100-0xC4FF  color lookup (1024)
  *   0xC500-0xC5FF  wave ROM (256)
+ *
+ * Tile VRAM uses MAME pacman_scan_rows (identical to Pac-Man) — not linear.
  */
 
 const PENGO_KEYCODE_MAP = makeKeycodeMap([
@@ -139,40 +141,40 @@ class PengoVideo {
         }
     }
 
+    /**
+     * MAME pacman_scan_rows (36×28 native tilemap). Same mapper for Pengo and
+     * Pac-Man — VRAM is NOT more linear on Pengo.
+     *
+     * Cabinet is rotated: upright (ux,uy) with ux=0..27 left→right, uy=0..35
+     * top→bottom maps as col=uy, row=27-ux.
+     */
+    static scanRows(col: number, row: number): number {
+        var row2 = row + 2;
+        var col2 = col - 2;
+        if (col2 & 0x20)
+            return row2 + ((col2 & 0x1f) << 5);
+        return col2 + (row2 << 5);
+    }
+
     drawFrame(pixels: Uint32Array) {
         pixels.fill(0xff000000);
         var pal = new Uint8Array(4);
         var tileBase = this.gfxBank ? 256 : 0;
         var sprBase = this.gfxBank ? 64 : 0;
 
-        var addr = 0;
-        for (var y = 34; y < 36; y++) {
-            for (var x = 31; x >= 0; x--) {
+        // Walk MAME native 36×28, plot into upright 28×36 framebuffer.
+        for (var row = 0; row < 28; row++) {
+            var ux = 27 - row;
+            for (var col = 0; col < 36; col++) {
+                var addr = PengoVideo.scanRows(col, row);
+                var uy = col;
                 this.getPalette(this.cram[addr], pal);
-                this.drawTile(pixels, tileBase + this.vram[addr], pal, (x - 2) * 8, y * 8);
-                addr++;
-            }
-        }
-
-        addr = 0x40;
-        for (var x = 29; x >= 2; x--) {
-            for (var y = 2; y <= 33; y++) {
-                this.getPalette(this.cram[addr], pal);
-                this.drawTile(pixels, tileBase + this.vram[addr], pal, (x - 2) * 8, y * 8);
-                addr++;
-            }
-        }
-
-        addr = 0x3c0;
-        for (var y = 0; y < 2; y++) {
-            for (var x = 31; x >= 0; x--) {
-                this.getPalette(this.cram[addr], pal);
-                this.drawTile(pixels, tileBase + this.vram[addr], pal, (x - 2) * 8, y * 8);
-                addr++;
+                this.drawTile(pixels, tileBase + this.vram[addr], pal, ux * 8, uy * 8);
             }
         }
 
         // Sprite attrs at 0x8FF0 → ram offset 0x7F0; coords at 0x9020
+        // (upright pixel space; Pengo has no Pac-Man xoffsethack)
         for (var s = 7; s >= 0; s--) {
             var info = this.ram[0x7f0 + s * 2];
             var palNo = this.ram[0x7f0 + s * 2 + 1];
