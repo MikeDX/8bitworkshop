@@ -31,7 +31,9 @@
  *  [CONFIRM] Clyde  → Pac if Euclidean²>64 (8 tiles), else his scatter tile
  *
  * FRIGHTENED
- *  [CHANGE] PRNG picks first try dir, then clockwise until legal
+ *  [CHANGE] PRNG: first try dir, then clockwise (same algorithm as arcade).
+ *           Entropy is our LCG / ROM image — not Midway’s bytes — so fright
+ *           routes will not match stock arcade 1:1. Scatter/chase can.
  *  [CHANGE] Red-zones ignored while frightened (may turn UP)
  *  [CHANGE] Full Table A.1 fright seconds (0 on L17/19/20/21+ → reverse only)
  *  [CHANGE] Flash count from A.1; energizer always reverses S/C/F ghosts
@@ -58,7 +60,12 @@
  *  [CONFIRM] Eyes 150%; house/leave 50%; Elroy1=Pac, Elroy2=Pac+5%
  *
  * RED-ZONE
- *  [CONFIRM] No UP at x=11..16, y=14|26 in scatter/chase (not fright/eyes)
+ *  [CONFIRM] Arcade (#1c0b): at mid, color of *current* tile RAM (4d0a) ==
+ *           0x1A → skip AI. 4d0a equals occupancy at mid (advance is after AI),
+ *           so check g->tx/ty — NOT lookahead. Lookahead skip kept DOWN into
+ *           the house door and stuck ghosts.
+ *  [CONFIRM] While pathfinding (approaching), forbid UP if lookahead in zone.
+ *  [CONFIRM] Fright skips the check (UP into those tunnels allowed).
  * =============================================================================
  */
 
@@ -98,11 +105,26 @@ const byte opp_dir[5] = { 0, DIR_LEFT, DIR_UP, DIR_RIGHT, DIR_DOWN };
 
 /* Scatter/chase phase — computed once per ghosts_update */
 static byte phase_mode;
+static byte phase_prev; /* 0xff = unset */
 static byte scatter_chase_mode(void);
+
+/* Toggled on S↔C while HOUSE/LEAVE/ENTER; consumed on door exit. */
+static byte ghost_exit_flip[GHOST_N];
 
 void ghost_frame_begin(void) {
   byte i;
   phase_mode = scatter_chase_mode();
+  if (phase_prev != 0xff && phase_prev != phase_mode &&
+      (phase_prev == MODE_SCATTER || phase_prev == MODE_CHASE) &&
+      (phase_mode == MODE_SCATTER || phase_mode == MODE_CHASE)) {
+    /* Housed ghosts don't change mode, but exit facing reverses. */
+    for (i = 0; i < GHOST_N; i++) {
+      byte m = ghosts[i].mode;
+      if (m == MODE_HOUSE || m == MODE_LEAVE || m == MODE_ENTER)
+        ghost_exit_flip[i] ^= 1;
+    }
+  }
+  phase_prev = phase_mode;
   if (!power_ticks) {
     for (i = 0; i < GHOST_N; i++)
       ghosts[i].frightened = 0;
@@ -111,6 +133,7 @@ void ghost_frame_begin(void) {
 
 #pragma opt_code_size
 void set_house_limits(void) {
+  byte i;
   /* [CONFIRM] dossier personal dot limits (Pinky always 0) */
   ghosts[0].dot_limit = 0;
   ghosts[1].dot_limit = 0;
@@ -130,6 +153,9 @@ void set_house_limits(void) {
     ghosts[2].dot_limit = 0;
     ghosts[3].dot_limit = 0;
   }
+  for (i = 0; i < GHOST_N; i++)
+    ghost_exit_flip[i] = 0;
+  phase_prev = 0xff;
 }
 
 /* [CHANGE] Table A.1 Elroy1 / Elroy2 dots-remaining (pairs). */
@@ -301,18 +327,60 @@ void move_pos_pac(byte* pos, byte dir) {
 }
 
 #pragma opt_code_size
-/* ---- ghost AI (dossier) ---- */
+/* ---- ghost AI (dossier + Midway ASM pacman.asm.txt) ----
+ *
+ * Decision timing (#1bf7–#1c36): at tile mid, dir←next_dir, tile RAM is
+ * advanced by next_dir *before* consumers (Inky reads Blinky @ #27cb from
+ * that advanced tile). Prefer order via #2966 / #32ff → UP wins ties.
+ * Red zone (#1c0b–#1c14): color 0x1A on *current* tile at mid → skip AI.
+ * Fright (#1bfe): no red-zone check — UP allowed.
+ * House exit: normally LEFT; reverse while housed → RIGHT (#dossier).
+ */
 
-/* Squared Euclidean to a (possibly off-map) target. Arcade uses signed tile
- * math — byte abs_diff + clamp-to-31 made Pinky/Inky off-map targets all look
- * equally far, so dirs_pref ties picked the wrong turn. */
+/* Squared Euclidean without __mulint/__div* (keep _CODE under tile_rom). */
+static const word tile_sqr[64] = {
+  0,1,4,9,16,25,36,49,64,81,100,121,144,169,196,225,
+  256,289,324,361,400,441,484,529,576,625,676,729,784,841,900,961,
+  1024,1089,1156,1225,1296,1369,1444,1521,1600,1681,1764,1849,1936,2025,2116,2209,
+  2304,2401,2500,2601,2704,2809,2916,3025,3136,3249,3364,3481,3600,3721,3844,3969
+};
+
 static word dist2_to(sbyte x, sbyte y, sbyte tx, sbyte ty) {
-  int dx = (int)x - (int)tx;
-  int dy = (int)y - (int)ty;
-  if (dx < 0) dx = -dx;
-  if (dy < 0) dy = -dy;
-  /* Tile deltas stay well under 128 for this maze. */
-  return (word)(dx * dx + dy * dy);
+  byte dx, dy;
+  {
+    int d = (int)x - (int)tx;
+    if (d < 0) d = -d;
+    dx = (d > 63) ? 63 : (byte)d;
+  }
+  {
+    int d = (int)y - (int)ty;
+    if (d < 0) d = -d;
+    dy = (d > 63) ? 63 : (byte)d;
+  }
+  return (word)(tile_sqr[dx] + tile_sqr[dy]);
+}
+
+/* #1c1c: after mid, ghost tile RAM = occupancy + dir until pixel wraps into
+ * that tile. Match that for Inky←Blinky and Clyde radius. */
+static void ghost_tile_ai(Ghost* g, byte* otx, byte* oty) {
+  byte d = g->dir;
+  byte ahead = 0;
+  if (d < 1 || d > 4) d = DIR_LEFT;
+  if (d == DIR_RIGHT) ahead = (g->ox >= 4);
+  else if (d == DIR_LEFT) ahead = (g->ox <= 4);
+  else if (d == DIR_DOWN) ahead = (g->oy >= 4);
+  else ahead = (g->oy <= 4); /* UP */
+  if (ahead) {
+    sbyte nx = (sbyte)((sbyte)g->tx + dir_dx[d]);
+    sbyte ny = (sbyte)((sbyte)g->ty + dir_dy[d]);
+    if (nx < 0) nx = 27;
+    else if (nx >= 28) nx = 0;
+    *otx = (byte)nx;
+    *oty = (byte)ny;
+  } else {
+    *otx = g->tx;
+    *oty = g->ty;
+  }
 }
 
 /* Scatter/chase phase ends (frames). L1 / L2–4 / L5+. Index 0..6 = S C S C S C S. */
@@ -389,18 +457,22 @@ static void ghost_target(byte i) {
     if (pd == DIR_UP)
       ai_tx = (sbyte)(ai_tx - 4);
   } else if (i == 2) {
-    /* Inky: pivot 2 ahead of Pac (UP also −2 X), target = 2*pivot − Blinky */
+    /* Inky: pivot 2 ahead of Pac (UP also −2 X), target = 2*pivot − Blinky.
+     * Blinky tile from arcade-advanced 4D0A (#27cb), not occupancy. */
     sbyte pivx, pivy;
-    sbyte bx = (sbyte)ghosts[0].tx;
-    sbyte by = (sbyte)ghosts[0].ty;
+    byte bx, by;
+    ghost_tile_ai(&ghosts[0], &bx, &by);
     pivx = (sbyte)(ptx + (sbyte)(pdx << 1));
     pivy = (sbyte)(pty + (sbyte)(pdy << 1));
     if (pd == DIR_UP)
       pivx = (sbyte)(pivx - 2);
-    ai_tx = (sbyte)(pivx + (pivx - bx));
-    ai_ty = (sbyte)(pivy + (pivy - by));
+    ai_tx = (sbyte)(pivx + (pivx - (sbyte)bx));
+    ai_ty = (sbyte)(pivy + (pivy - (sbyte)by));
   } else {
-    /* Clyde: chase if Euclidean² > 64 (exactly 8 → scatter, dossier) */
+    /* Clyde: chase Pac only if farther than 8 tiles (dist² > 64).
+     * Dossier / flooh use >; arcade jp-c is strict <64 for retreat —
+     * at exactly 8 tiles, > keeps him retreating (safer, classic feel).
+     * Occupancy tile (not AI-ahead) for the radius test. */
     if (dist2_to((sbyte)g->tx, (sbyte)g->ty, ptx, pty) > 64) {
       ai_tx = ptx;
       ai_ty = pty;
@@ -483,8 +555,20 @@ byte update_ghost_dir(byte i) {
   gdir = g->next_dir;
   if (gdir > 4) gdir = DIR_RIGHT;
   g->dir = gdir;
-  lx = (byte)((sbyte)g->tx + dir_dx[gdir]);
-  ly = (byte)((sbyte)g->ty + dir_dy[gdir]);
+  /* Advanced tile for pathfinding origin — tunnel-wrap like #2000. */
+  {
+    sbyte slx = (sbyte)((sbyte)g->tx + dir_dx[gdir]);
+    sbyte sly = (sbyte)((sbyte)g->ty + dir_dy[gdir]);
+    if (slx < 0) slx = 27;
+    else if (slx >= 28) slx = 0;
+    lx = (byte)slx;
+    ly = (byte)sly;
+  }
+
+  /* Red zone (#1c0b): CURRENT tile at mid (arcade 4d0a before advance). */
+  if ((mode == MODE_SCATTER || mode == MODE_CHASE) &&
+      g->tx >= 11 && g->tx <= 16 && (g->ty == 14 || g->ty == 26))
+    return 0;
 
   if (mode == MODE_FRIGHT) {
     byte start = (byte)(rand8() & 3);
@@ -507,16 +591,18 @@ byte update_ghost_dir(byte i) {
       word dist;
       sbyte nx, ny;
       d = dirs_pref[di];
+      /* No UP into red-zone tiles (approaching); eyes exempt; fright above. */
       if (d == DIR_UP && mode != MODE_EYES &&
           lx >= 11 && lx <= 16 && (ly == 14 || ly == 26))
         continue;
       if (!dir_open(lx, ly, d, gdir)) continue;
-      /* Destination tile (tunnel-wrap X) vs signed target. */
       nx = (sbyte)((sbyte)lx + dir_dx[d]);
       ny = (sbyte)((sbyte)ly + dir_dy[d]);
       if (nx < 0) nx = 27;
       else if (nx >= 28) nx = 0;
       dist = dist2_to(nx, ny, ai_tx, ai_ty);
+      /* Arcade #29b7: update when new <= best → later (UP) wins ties.
+       * dirs_pref puts UP first with strict < — same UP-wins result. */
       if (dist < best_dist) {
         best_dist = dist;
         best = d;
@@ -571,7 +657,10 @@ void update_ghost_state(byte i) {
 
   if (new_mode != mode) {
     if (mode == MODE_LEAVE) {
-      g->dir = g->next_dir = DIR_LEFT;
+      /* Door exit facing: LEFT default; RIGHT if S↔C reversed while housed. */
+      g->dir = g->next_dir =
+        ghost_exit_flip[i] ? DIR_RIGHT : DIR_LEFT;
+      ghost_exit_flip[i] = 0;
     } else if (mode == MODE_SCATTER || mode == MODE_CHASE) {
       /* [CONFIRM] reverse on chase↔scatter; fright reverse is in try_eat_tile */
       if (new_mode == MODE_SCATTER || new_mode == MODE_CHASE)

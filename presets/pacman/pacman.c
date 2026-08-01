@@ -29,6 +29,9 @@
 #if defined(ATTRACT_RECORD) && defined(ATTRACT_DEV)
 #error "Define ATTRACT_RECORD or ATTRACT_DEV, not both"
 #endif
+#if defined(ATTRACT_DEV) || defined(ATTRACT_RECORD)
+#define ATTRACT_MAZE_ONLY 1  /* drop title/chase/game_loop from _CODE */
+#endif
 
 #include "pacman_common.h"
 #include "pacman_assets.h"
@@ -217,36 +220,6 @@ static void show_ready_banner(byte player_one) {
   put_string(11, 20, "      ", 0);
 }
 
-/*
- * Attract / intro (floooh intro_tick timing) + chase demo.
- * Coin adds a credit (cap 99), plays ding, and aborts the slow intro so
- * START can begin a game once credits > 0.
- */
-#define TILE_PTS0        0x5D
-#define TILE_PTS1        0x5E
-#define TILE_PTS2        0x5F
-#define TILE_COPYRIGHT   0x5C  /* (C) */
-#define TILE_PERIOD      0x25  /* . */
-
-/* Soft ghost: 2×3 tile stamp (sprites free for chase later). */
-static void attract_draw_ghost(byte x, byte y, byte pal) {
-  poke_tile(x, y,                         0xB0, pal);
-  poke_tile((byte)(x + 1), y,             0xB1, pal);
-  poke_tile(x, (byte)(y + 1),             0xB2, pal);
-  poke_tile((byte)(x + 1), (byte)(y + 1), 0xB3, pal);
-  poke_tile(x, (byte)(y + 2),             0xB4, pal);
-  poke_tile((byte)(x + 1), (byte)(y + 2), 0xB5, pal);
-}
-
-/* Attract energizers — arcade pixel (py,px) → tile via comment above.
- *   chase pill  (160,184) → (4,20)
- *   score legend (208,136) → (10,26)  drawn at t==570 with "50 PTS"
- */
-#define ATTRACT_CHASE_PX  4
-#define ATTRACT_CHASE_PY  20
-#define ATTRACT_SCORE_PX  10
-#define ATTRACT_SCORE_PY  26
-
 /* "CREDIT  0" / "CREDIT 10" — arcade spacing (two spaces if <10, one if ≥10). */
 static void draw_credits(void) {
   byte n = credits;
@@ -282,6 +255,37 @@ static byte poll_credit(void) {
   coin_was_down = down;
   return added;
 }
+
+#ifndef ATTRACT_MAZE_ONLY
+/*
+ * Attract / intro (floooh intro_tick timing) + chase demo.
+ * Coin adds a credit (cap 99), plays ding, and aborts the slow intro so
+ * START can begin a game once credits > 0.
+ */
+#define TILE_PTS0        0x5D
+#define TILE_PTS1        0x5E
+#define TILE_PTS2        0x5F
+#define TILE_COPYRIGHT   0x5C  /* (C) */
+#define TILE_PERIOD      0x25  /* . */
+
+/* Soft ghost: 2×3 tile stamp (sprites free for chase later). */
+static void attract_draw_ghost(byte x, byte y, byte pal) {
+  poke_tile(x, y,                         0xB0, pal);
+  poke_tile((byte)(x + 1), y,             0xB1, pal);
+  poke_tile(x, (byte)(y + 1),             0xB2, pal);
+  poke_tile((byte)(x + 1), (byte)(y + 1), 0xB3, pal);
+  poke_tile(x, (byte)(y + 2),             0xB4, pal);
+  poke_tile((byte)(x + 1), (byte)(y + 2), 0xB5, pal);
+}
+
+/* Attract energizers — arcade pixel (py,px) → tile via comment above.
+ *   chase pill  (160,184) → (4,20)
+ *   score legend (208,136) → (10,26)  drawn at t==570 with "50 PTS"
+ */
+#define ATTRACT_CHASE_PX  4
+#define ATTRACT_CHASE_PY  20
+#define ATTRACT_SCORE_PX  10
+#define ATTRACT_SCORE_PY  26
 
 static void attract_draw_copyright(void) {
   /* (C) 1980 MIDWAY MFG.CO. — arcade tile (4,28), pal 3 */
@@ -545,6 +549,7 @@ static void attract_chase(void) {
   power_ticks = 0;
   freeze_ticks = 0;
 }
+#endif /* !ATTRACT_MAZE_ONLY */
 
 /*
  * Maze attract: silent, no PLAYER/READY.
@@ -613,6 +618,15 @@ static void demo_rec_sample(void) {
   demo_rec_n++;
 }
 
+static void put_u8_dec3(byte x, byte y, byte n, byte pal) {
+  byte h = 0, t = 0;
+  while (n >= 100) { n = (byte)(n - 100); h++; }
+  while (n >= 10) { n = (byte)(n - 10); t++; }
+  put_digit(x, y, h, pal);
+  put_digit((byte)(x + 1), y, t, pal);
+  put_digit((byte)(x + 2), y, n, pal);
+}
+
 static void demo_rec_finish(void) {
   /* Optional end marker if room — count in demo_rec_n stays real keys. */
   if (demo_rec_n < DEMO_REC_MAX) {
@@ -620,9 +634,7 @@ static void demo_rec_finish(void) {
     demo_rec[demo_rec_n].dir = 0;
   }
   put_string(7, 16, "REC", 0x0F);
-  put_digit(11, 16, (byte)(demo_rec_n / 100), 0x0F);
-  put_digit(12, 16, (byte)((demo_rec_n / 10) % 10), 0x0F);
-  put_digit(13, 16, (byte)(demo_rec_n % 10), 0x0F);
+  put_u8_dec3(11, 16, demo_rec_n, 0x0F);
   put_string(7, 18, "RAM 4CB0", 0x0F);
 }
 #endif /* ATTRACT_RECORD */
@@ -791,10 +803,8 @@ static byte attract_maze_demo(void) {
     flash_power_pills(1);
     actors_draw();
 #ifdef ATTRACT_RECORD
-    /* Live key count while training */
-    put_digit(25, 0, (byte)(demo_rec_n / 100), 0x0F);
-    put_digit(26, 0, (byte)((demo_rec_n / 10) % 10), 0x0F);
-    put_digit(27, 0, (byte)(demo_rec_n % 10), 0x0F);
+    /* Live key count while training (no / — avoids __divuint) */
+    put_u8_dec3(25, 0, demo_rec_n, 0x0F);
 #endif
   }
 
@@ -804,6 +814,7 @@ static byte attract_maze_demo(void) {
   return 1;
 }
 
+#ifndef ATTRACT_MAZE_ONLY
 static void attract_draw_pts_legend(void) {
   poke_tile(10, 24, T_DOT_A, PAL_DOT);
   put_string(12, 24, "10 ", 0x0F);
@@ -907,6 +918,7 @@ restart_attract:
   attract_corridor = 0;
   sfx_off();
 }
+#endif /* !ATTRACT_MAZE_ONLY */
 
 void show_death(void) {
   byte t, frame;
@@ -967,6 +979,7 @@ void start_round(byte player_one) {
     show_ready_banner(player_one);
 }
 
+#ifndef ATTRACT_MAZE_ONLY
 void next_level(void) {
   byte t;
   sfx_off();
@@ -1038,6 +1051,7 @@ void game_loop(void) {
       next_level();
   }
 }
+#endif /* !ATTRACT_MAZE_ONLY */
 
 void main(void) {
   sound_enable = 1;
