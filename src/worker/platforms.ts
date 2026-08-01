@@ -66,6 +66,18 @@ export var PLATFORM_PARAMS = {
       data_size: 0x400,
       stack_end: 0x4800,
     },
+    'pengo': {
+      arch: 'z80',
+      code_start: 0x0,
+      /* ABS CRT (_HEADER) ends ~0xCA; _CODE follows. */
+      codeseg_start: 0xca,
+      rom_size: 0x10000,  // 32KB prog + 16KB gfx + PROMs, padded to 64KB
+      /* Pengo map: VRAM 0x8000, work RAM 0x8800-0x8FEF, sprites 0x8FF0.
+       * Soft sound block at 0x8E8C-0x8EFB (homebrew). */
+      data_start: 0x8800,
+      data_size: 0x68c,   // 0x8800-0x8e8b (stop before soft sound)
+      stack_end: 0x8fc0,  // above sound block; sprite attrs at 0x8ff0-0x8fff
+    },
     'williams': {
       arch: '6809',
       code_start: 0x0,
