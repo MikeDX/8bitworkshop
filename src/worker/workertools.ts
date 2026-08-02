@@ -17,6 +17,7 @@ import * as cc2600 from './tools/cc2600'
 import * as bataribasic from './tools/bataribasic'
 import * as oscar64 from './tools/oscar64'
 import * as xa from './tools/xa'
+import * as snes from './tools/snes'
 
 import { PLATFORM_PARAMS } from "./platforms";
 
@@ -62,6 +63,7 @@ export const TOOLS = {
   'armtcclink': arm.linkARMTCC,
   'oscar64': oscar64.compileOscar64,
   'xa': xa.assembleXA,
+  'snes-c': snes.compileSnesC,
 }
 
 export const TOOL_PRELOADFS = {

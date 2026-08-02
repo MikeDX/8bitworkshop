@@ -389,6 +389,17 @@ export var PLATFORM_PARAMS = {
       stack_end: 0xe800,
       // TODO: IHX can't handle > 64 KB, so ihx2sms looks for segments in a certain order
     },
+    'snes': {
+      arch: 'wdc65816',
+      wiz_sys_type: 'wdc65816',
+      wiz_inc_dir: 'snes',
+      wiz_rom_ext: '.sfc',
+      rom_ext: '.sfc',
+      extra_compile_files: [
+        'hdr.asm', 'crt0.asm', 'snes.asm', 'snes.h',
+        'tiles.asm', 'hello_tiles.chr',
+      ],
+    },
 };
   
   PLATFORM_PARAMS['sms-sms-libcv'] = PLATFORM_PARAMS['sms-sg1000-libcv'];

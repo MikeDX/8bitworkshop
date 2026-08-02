@@ -1,0 +1,145 @@
+import "snes";
+
+config {
+    map_mode = "lorom",
+}
+
+bank zeropage @ 0x00 : [vardata; 256];
+bank stack @ 0x100 : [vardata; 256];
+bank prg @ 0x808000 : [constdata; 0x8000];
+
+in zeropage {
+    var b0, b1 : u8;
+    var w0 @ &b0 : u16;
+}
+
+in prg {
+    #[mem8, idx16]
+    inline func hardware_init() {
+        xx = 0;
+        snes.ppu.brightness = a = snes.ppu.BRIGHTNESS_FORCE_BLANK | snes.ppu.BRIGHTNESS_MASK;
+        snes.ppu.obj_control = 0;
+        snes.ppu.oam_address_hl = xx;
+        snes.ppu.bg_mode = 0;
+        snes.ppu.mosaic = 0;
+        snes.ppu.bg1_tilemap = 0;
+        snes.ppu.bg2_tilemap = 0;
+        snes.ppu.bg3_tilemap = 0;
+        snes.ppu.bg4_tilemap = 0;
+        snes.ppu.bg12_tileset = 0;
+        snes.ppu.bg34_tileset = 0;
+        snes.ppu.bg1_scroll_x = 0;
+        snes.ppu.bg1_scroll_x = 0;
+        snes.ppu.bg1_scroll_y = a = 0xFF;
+        snes.ppu.bg1_scroll_y = a;
+        snes.ppu.bg2_scroll_x = 0;
+        snes.ppu.bg2_scroll_x = 0;
+        snes.ppu.bg2_scroll_y = a;
+        snes.ppu.bg2_scroll_y = a;
+        snes.ppu.bg3_scroll_x = 0;
+        snes.ppu.bg3_scroll_x = 0;
+        snes.ppu.bg3_scroll_y = a;
+        snes.ppu.bg3_scroll_y = a;
+        snes.ppu.bg4_scroll_x = 0;
+        snes.ppu.bg4_scroll_x = 0;
+        snes.ppu.bg4_scroll_y = a;
+        snes.ppu.bg4_scroll_y = a;
+        snes.ppu.mode7_control = 0;
+        snes.ppu.cgram_address = 0;
+        snes.ppu.win_bg12_control = 0;
+        snes.ppu.win_bg34_control = 0;
+        snes.ppu.win_obj_control = 0;
+        snes.ppu.win1_left = 0;
+        snes.ppu.win1_right = 0;
+        snes.ppu.win2_left = 0;
+        snes.ppu.win2_right = 0;
+        snes.ppu.screen_enable_mask = 0;
+        snes.ppu.sub_screen_enable_mask = 0;
+        snes.ppu.color_control = a = snes.ppu.COLOR_CONTROL_DISABLE_BLEND_INNER | snes.ppu.COLOR_CONTROL_DISABLE_BLEND_OUTER;
+        snes.ppu.color_math = 0;
+        snes.ppu.color_fill = a = snes.ppu.COLOR_FILL_R | snes.ppu.COLOR_FILL_G | snes.ppu.COLOR_FILL_B;
+        snes.ppu.video_control = 0;
+        snes.ppu.irq_enable = 0;
+        snes.dma.mdma_enable = 0;
+        snes.dma.hdma_enable = 0;
+        snes.rom.speed = 0;
+
+        // Clear VRAM via DMA.
+        snes.ppu.vram_control = a = snes.ppu.VRAM_CONTROL_INCREMENT_1 | snes.ppu.VRAM_CONTROL_SIZE_2;
+        snes.ppu.vram_address_hl = xx = 0;
+        w0 = xx = 0;
+        snes.dma0.control = a = snes.dma.CONTROL_MODE_AB | snes.dma.CONTROL_MDMA_NO_INCREMENT;
+        snes.dma0.mdma_dest = a = <:&snes.ppu.vram_write_data_l;
+        snes.dma0.src_address_hl = xx = &w0 as u16;
+        snes.dma0.src_address_bank = 0;
+        snes.dma0.mdma_size_hl = xx = 0x10000 & 0xFFFF;
+        snes.dma.mdma_enable = a = snes.dma.ENABLE_0;
+    }
+
+    #[fallthrough] func main() {
+        nointerrupt = true;
+        decimal = false;
+        carry = false;
+        swap_carry_emulation();
+
+        mem8_idx16();
+        #[mem8, idx16] {
+            ss = xx = 0x01FF;
+            hardware_init();
+
+            // Load tiles into VRAM at address 0.
+            snes.ppu.vram_control = a = snes.ppu.VRAM_CONTROL_INCREMENT_1 | snes.ppu.VRAM_CONTROL_SIZE_2;
+            snes.ppu.vram_address_hl = xx = 0;
+            snes.dma0.control = a = snes.dma.CONTROL_MODE_AB;
+            snes.dma0.mdma_dest = a = <:&snes.ppu.vram_write_data_l;
+            snes.dma0.src_address_hl = xx = &hello_tiles_chr as u16;
+            snes.dma0.src_address_bank = 0;
+            snes.dma0.mdma_size_hl = xx = sizeof(typeof(hello_tiles_chr)) / sizeof(u16);
+            snes.dma.mdma_enable = a = snes.dma.ENABLE_0;
+
+            // Load palette.
+            snes.ppu.cgram_address = 0;
+            snes.dma0.control = a = snes.dma.CONTROL_MODE_A;
+            snes.dma0.mdma_dest = a = <:&snes.ppu.cgram_write_data;
+            snes.dma0.src_address_hl = xx = &palette as u16;
+            snes.dma0.src_address_bank = 0;
+            snes.dma0.mdma_size_hl = xx = sizeof(typeof(palette));
+            snes.dma.mdma_enable = a = snes.dma.ENABLE_0;
+
+            // Write "HELLO WORLD" to tilemap.
+            let BG1_TILEMAP_BASE = 0x1000;
+            let TEXT_X = 10;
+            let TEXT_Y = 13;
+            snes.ppu.vram_control = a = snes.ppu.VRAM_CONTROL_INCREMENT_1 | snes.ppu.VRAM_CONTROL_SIZE_1;
+            snes.ppu.vram_address_hl = xx = BG1_TILEMAP_BASE + TEXT_Y * 32 + TEXT_X;
+            snes.dma0.control = a = snes.dma.CONTROL_MODE_A;
+            snes.dma0.mdma_dest = a = <:&snes.ppu.vram_write_data_l;
+            snes.dma0.src_address_hl = xx = &message as u16;
+            snes.dma0.src_address_bank = 0;
+            snes.dma0.mdma_size_hl = xx = sizeof(typeof(message));
+            snes.dma.mdma_enable = a = snes.dma.ENABLE_0;
+
+            // Configure BG1 and enable display.
+            snes.ppu.bg1_tilemap = a = BG1_TILEMAP_BASE >> snes.ppu.BG_TILEMAP_ADDRESS_BIT_ALIGN << snes.ppu.BG_TILEMAP_ADDRESS_SHIFT_LEFT;
+            snes.ppu.bg12_tileset = a = 0;
+            snes.ppu.bg_mode = a = 2;
+            snes.ppu.screen_enable_mask = a = snes.ppu.SCREEN_ENABLE_BG1;
+            snes.ppu.brightness = a = 0xF;
+
+            while true {}
+        }
+    }
+
+    let rgb_pack(r, g, b) = (r & 0x1F) | ((g & 0x1F) << 5) | ((b & 0x1F) << 10);
+
+    const palette : [u16] = [
+        rgb_pack(0x1C, 0x10, 0x12), rgb_pack(0x06, 0x06, 0x0C), rgb_pack(0, 0, 0), rgb_pack(0, 0, 0),
+        rgb_pack(0, 0, 0), rgb_pack(0, 0, 0), rgb_pack(0, 0, 0), rgb_pack(0, 0, 0),
+        rgb_pack(0, 0, 0), rgb_pack(0, 0, 0), rgb_pack(0, 0, 0), rgb_pack(0, 0, 0),
+        rgb_pack(0, 0, 0), rgb_pack(0, 0, 0), rgb_pack(0, 0, 0), rgb_pack(0x1F, 0x1F, 0x1F),
+    ];
+
+    const message = "HELLO  WORLD";
+    const hello_tiles_chr = embed "hello_tiles.chr";
+    const @ 0x80FFFC = main;
+}

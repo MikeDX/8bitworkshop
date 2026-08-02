@@ -15,7 +15,18 @@ export function setupRequireFunction() {
       this.window = {};
     }
   };
+  // Keep Node builtins available — some Emscripten modules detect Node+Worker
+  // and call require('path') / require('fs').
+  var nodeBuiltins: Record<string, any> = {};
+  if (typeof process === 'object' && process.versions && process.versions.node) {
+    try {
+      nodeBuiltins.path = require('path');
+      nodeBuiltins.fs = require('fs');
+      nodeBuiltins.crypto = require('crypto');
+    } catch (e) { /* browser bundle */ }
+  }
   emglobal['require'] = (modname: string) => {
+    if (nodeBuiltins[modname]) return nodeBuiltins[modname];
     console.log('require', modname, exports[modname] != null);
     return exports[modname];
   }

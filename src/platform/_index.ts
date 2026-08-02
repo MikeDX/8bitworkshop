@@ -25,6 +25,7 @@ export function importPlatform(name: string) : Promise<any> {
       case "nes": return import("../platform/nes");
       case "pce": return import("../platform/pce");
       case "sms": return import("../platform/sms");
+      case "snes": return import("../platform/snes");
       case "sound_konami": return import("../platform/sound_konami");
       case "sound_williams": return import("../platform/sound_williams");
       case "vcs": return import("../platform/vcs");
