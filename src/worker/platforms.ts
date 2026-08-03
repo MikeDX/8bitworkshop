@@ -355,6 +355,12 @@ export var PLATFORM_PARAMS = {
       extra_link_files: ['crt0.o', 'exidy.cfg'],
       //extra_compile_files: ['exidy.h'],
     },
+    'pcktgal': {
+      define: ['__PCKTGAL__'],
+      cfgfile: 'pcktgal.cfg',
+      libargs: ['crt0.o', 'none.lib'],
+      extra_link_files: ['crt0.o', 'pcktgal.cfg'],
+    },
     'arm32': {
       arch: 'arm32',
       define: ['__ARM__', 'DISABLE_UNIMPLEMENTED_LIBC_APIS', 'PRINTF_ALIAS_STANDARD_FUNCTION_NAMES_SOFT'],

@@ -87,6 +87,8 @@ export const TOOL_PRELOADFS = {
   'ca65-pce': '65-pce',
   'cc65-exidy': '65-none',
   'ca65-exidy': '65-none',
+  'cc65-pcktgal': '65-none',
+  'ca65-pcktgal': '65-none',
   'sdasz80': 'sdcc',
   'sdasgb': 'sdcc',
   'sdcc': 'sdcc',
