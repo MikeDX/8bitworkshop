@@ -224,11 +224,11 @@ export function validateAssetData(datastr: string, fmt): string | null {
         maxOffset = Math.max(maxOffset, offset);
       }
     }
-    // Planar formats (e.g. NES pofs>=wpimg) store extra planes past each image block.
-    // Interleaved formats (GB/SMS pofs < wpimg) already include plane bytes in maxOffset.
-    var planeExtent = (nplanes > 1) ? (nplanes - 1) * pofs : 0;
-    if (planeExtent < wpimg) planeExtent = 0;
-    var required = maxOffset + planeExtent + 1 + skip;
+    // When pofs < wpimg, planes live inside each image and maxOffset already
+    // covers them (e.g. pcktgal tiles: wpimg:32, pofs:8). Extra plane banks
+    // only apply when planes are stored after the image block (pofs >= wpimg).
+    var planeExtra = (nplanes > 1 && pofs >= wpimg) ? (nplanes - 1) * pofs : 0;
+    var required = maxOffset + planeExtra + 1 + skip;
 
     if (words.length != required) {
       return `Expected ${required} value(s), found ${words.length}`;
@@ -255,13 +255,18 @@ export function convertImagesToWords(images: Uint8Array[], fmt: PixelEditorImage
   var skip = fmt.skip || 0;
   var wpimg = fmt.wpimg || wordsperline * height;
 
+  // When pofs < wpimg, all planes sit inside each image (pcktgal tiles/sprites).
+  // Otherwise wpimg is one plane and we need nplanes copies (typical NES CHR).
+  var packedPlanes = nplanes > 1 && pofs < wpimg;
+  var nwords = packedPlanes || (nplanes > 0 && fmt.sl)
+    ? wpimg * count
+    : wpimg * count * nplanes;
+
   var words;
-  if (nplanes > 0 && fmt.sl) // TODO?
-    words = new Uint8Array(wpimg * count);
-  else if (bitsperword <= 8)
-    words = new Uint8Array(wpimg * count * nplanes);
+  if (bitsperword <= 8)
+    words = new Uint8Array(nwords);
   else
-    words = new Uint32Array(wpimg * count * nplanes);
+    words = new Uint32Array(nwords);
 
   for (var n = 0; n < count; n++) {
     var imgdata = images[n];
@@ -310,6 +315,9 @@ export function getPaletteLength(palfmt: PixelEditorPaletteFormat): number {
     var gg = Math.floor(Math.abs(pal / 10) % 10);
     var bb = Math.floor(Math.abs(pal) % 10);
     return 1 << (rr + gg + bb);
+  } else if (pal === 'pcktgal') {
+    // DECO RGB444 PROM: n colors from first n RG bytes + next n B bytes
+    return palfmt.n || 512;
   } else {
     var paltable = PREDEF_PALETTES[pal];
     if (paltable) {
@@ -318,6 +326,12 @@ export function getPaletteLength(palfmt: PixelEditorPaletteFormat): number {
       throw new Error("No palette named " + pal);
     }
   }
+}
+
+function expandPromNibble(n: number): number {
+  // Match PocketGalMachine.promNibble (4-bit resistor ladder → 8-bit)
+  n &= 0xf;
+  return 0x0e * ((n >> 0) & 1) + 0x1f * ((n >> 1) & 1) + 0x43 * ((n >> 2) & 1) + 0x8f * ((n >> 3) & 1);
 }
 
 export function convertPaletteFormat(palbytes: UintArray, palfmt: PixelEditorPaletteFormat): number[] {
@@ -332,6 +346,18 @@ export function convertPaletteFormat(palbytes: UintArray, palfmt: PixelEditorPal
       newpalette = convertPaletteBytes(palbytes, 0, rr, rr, gg, rr + gg, bb);
     else
       newpalette = convertPaletteBytes(palbytes, rr + gg, bb, rr, gg, 0, rr);
+  } else if (pal === 'pcktgal') {
+    // 512 RG bytes (low=R, high=G) + 512 B bytes → 512 ARGB pens
+    var n = palfmt.n || 512;
+    newpalette = [];
+    for (var i = 0; i < n; i++) {
+      var rg = palbytes[i] || 0;
+      var bb = palbytes[i + n] || 0;
+      var r = expandPromNibble(rg & 0xf);
+      var g = expandPromNibble(rg >> 4);
+      var b = expandPromNibble(bb & 0xf);
+      newpalette.push(0xff000000 | (b << 16) | (g << 8) | r);
+    }
   } else {
     var paltable = PREDEF_PALETTES[pal];
     if (paltable) {
@@ -392,6 +418,36 @@ var PREDEF_LAYOUTS: { [id: string]: PixelEditorPaletteLayout } = {
     ['Sprite 1', 0x15, 3],
     ['Sprite 2', 0x19, 3],
     ['Sprite 3', 0x1d, 3]
+  ],
+  // Pocket Gal / DECO BAC06:
+  //   sprites: colour bank → pens (bank*4 + pix), pix 0..3 (2bpp)
+  //   tiles:   colour bank → pens (256 + bank*16 + pix), pix 0..15 (4bpp)
+  // Pac-Man homebrew only populates pix 0..3 in each tile bank (source is 2bpp).
+  'pcktgal': [
+    ['Pac', 0, 4],
+    ['Blinky', 4, 4],
+    ['Fruit', 8, 4],
+    ['Pinky', 12, 4],
+    ['Scared blink', 16, 4],
+    ['Inky', 20, 4],
+    ['Scared', 24, 4],
+    ['Clyde', 28, 4],
+    ['Maze', 256, 16],
+    ['Tile 1', 272, 16],
+    ['Tile 2', 288, 16],
+    ['Tile 3', 304, 16],
+    ['Tile 4', 320, 16],
+    ['Tile 5', 336, 16],
+    ['Tile 6', 352, 16],
+    ['Tile 7', 368, 16],
+    ['Door', 384, 16],
+    ['Tile 9', 400, 16],
+    ['Tile 10', 416, 16],
+    ['Tile 11', 432, 16],
+    ['Tile 12', 448, 16],
+    ['Tile 13', 464, 16],
+    ['Tile 14', 480, 16],
+    ['Tile 15', 496, 16],
   ],
   'astrocade': [
     ['Left', 0x00, -4],
@@ -690,10 +746,14 @@ export class PaletteFormatToRGB extends PixNode {
   updateRight() {
     if (equalArrays(this.words, this.left.words)) return false;
     this.words = this.left.words;
-    this.palette = dedupPalette(convertPaletteFormat(this.words, this.palfmt));
+    // Keep true colors for tile/sprite Palettizer slices. Dedup only the
+    // per-cell preview swatches so identical PROM pens stay separately editable.
+    var converted = convertPaletteFormat(this.words, this.palfmt);
+    this.palette = Uint32Array.from(converted);
     this.layout = PREDEF_LAYOUTS[this.palfmt.layout];
+    var displayPal = dedupPalette(converted);
     this.rgbimgs = [];
-    this.palette.forEach((rgba: number) => {
+    displayPal.forEach((rgba: number) => {
       this.rgbimgs.push(new Uint32Array([rgba]));
     });
     return true;
