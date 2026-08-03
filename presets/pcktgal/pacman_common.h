@@ -45,6 +45,8 @@ extern volatile byte _pac_p2;
 
 word vram_addr(byte x, byte y);
 void poke_tile(byte x, byte y, byte tile, byte pal);
+/* Direct BAC06 write — skip logical→hw transform (maze fill). */
+void poke_tile_hw(byte hx, byte hy, byte tile, byte pal);
 void poke_pal(byte x, byte y, byte pal);
 byte peek_tile(byte x, byte y);
 void clrscr(byte pal);

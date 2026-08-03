@@ -3,21 +3,23 @@
 #include "pacman_assets.h"
 #include "pacman_sfx.h"
 #include "pacman_actors.h"
+#include <peekpoke.h>
 
 /*
  * Playfield: left half only (14×31). Right side mirrors with odd/even tile
  * pairs (tile^1); a few wall pieces are flip-symmetric and keep the same index.
  *
- * Pac-Man middle VRAM (screen y=2..33) is stored as 28 vertical strips of 32
- * bytes at 0x4040 / 0x4440: strip s holds screen x = 27-s, with byte
- * (y-2) along the strip. Maze rows 0..30 sit at screen y=3..33 → strip
- * offsets 1..31. Drawing walks those addresses forward instead of poke_tile.
+ * maze_ram[] caches screen y=3..33 so collision / eat avoid VRAM peeks.
+ * draw_maze writes RAM + BAC06 via poke_tile_hw (one hx per row).
  *
- * Color RAM: maze/dots use 0x10; ghost-house door uses 0x18.
+ * Color: maze/dots use 0x10; ghost-house door uses 0x18.
  */
 #define MAZE_Y0    3
 #define MAZE_ROWS  31
 #define MAZE_HALF  14
+/* Must match pacman_common.c LOGIC_*_SHIFT */
+#define LOGIC_X_SHIFT  2
+#define LOGIC_Y_SHIFT  2
 
 /* Left 14 columns × 31 rows (screen x = 0..13). */
 static const byte maze_left[MAZE_ROWS * MAZE_HALF] = {
@@ -57,6 +59,9 @@ static const byte maze_left[MAZE_ROWS * MAZE_HALF] = {
 /* Bits for tiles 0xc0..0xe7: set = same index on L/R (flip-symmetric). */
 static const byte maze_sym[5] = { 0x00, 0x80, 0x00, 0xb8, 0x20 };
 
+/* Playfield tile cache — 28×31 = 868 bytes (collision + eat without VRAM). */
+static byte maze_ram[MAZE_ROWS * 28];
+
 static byte mirror_tile(byte t) {
   byte ix;
   if (t < 0xc0) return t; /* dots, power, blank */
@@ -67,21 +72,44 @@ static byte mirror_tile(byte t) {
 }
 
 /*
- * Fast draw: walk left half once; L/R VRAM pointers step ±32 (one strip).
- * Color is almost always PAL_MAZE — only the ghost-house door uses PAL_DOOR.
+ * Fill maze_ram + BAC06.
+ *
+ * VRAM is linear in hx at fixed hy: addr = 0x0800 + (hy*32 + hx)*2.
+ * After rotate, a portrait column (fixed tx → fixed hy) is one contiguous
+ * strip (hx decreases as ty increases → walk addr downward by 2).
+ * Source is row-major left-half; we gather by column for the VRAM walk.
  */
 void draw_maze(void) {
-  const byte* src = maze_left;
-  byte row, col;
+  byte col, row;
+  byte* ram;
 
-  for (row = 0; row < MAZE_ROWS; row++) {
-    byte sy = (byte)(row + MAZE_Y0);
-    for (col = 0; col < MAZE_HALF; col++) {
-      byte tile = *src++;
-      byte mt = mirror_tile(tile);
+  /* 1) Expand left half + mirror into maze_ram (row-major). */
+  {
+    const byte* src = maze_left;
+    for (row = 0; row < MAZE_ROWS; row++) {
+      ram = &maze_ram[(word)row * 28u];
+      for (col = 0; col < MAZE_HALF; col++) {
+        byte tile = *src++;
+        ram[col] = tile;
+        ram[27 - col] = mirror_tile(tile);
+      }
+    }
+  }
+
+  /* 2) One linear VRAM strip per portrait column (hy = tx + 2). */
+  for (col = 0; col < 28; col++) {
+    byte hy = (byte)(col + LOGIC_X_SHIFT);
+    /* ty = MAZE_Y0+0 → hx = 31-(3-2) = 30; each next row hx-- */
+    word addr = (word)(0x0800 + ((word)hy * 32u + 30u) * 2u);
+    ram = &maze_ram[col]; /* column col, row 0 */
+    for (row = 0; row < MAZE_ROWS; row++) {
+      byte tile = *ram;
       byte pal = (tile == T_DOOR) ? PAL_DOOR : PAL_MAZE;
-      poke_tile(col, sy, tile, pal);
-      poke_tile((byte)(27 - col), sy, mt, (mt == T_DOOR) ? PAL_DOOR : PAL_MAZE);
+      byte hi = (byte)((pal & 0x0f) << 4);
+      POKE(addr, hi);
+      POKE(addr + 1, tile);
+      ram += 28;   /* next maze row, same column */
+      addr -= 2;   /* next logical row → hx-- → prior word */
     }
   }
 }
@@ -94,25 +122,26 @@ void count_dots(void) {
 }
 
 byte maze_tile(byte tx, byte ty) {
-  return peek_tile(tx, ty);
+  return peek_maze(tx, ty);
 }
 
-/* Mid-band VRAM (screen y=2..33): strip (27-tx) × 32 + (ty-2).
- * Use an explicit word offset — SDCC miscompiles the pointer form of
- * `((word)(27-tx)<<5)` as a byte rotate (wrong for strip ≥ 8). */
 byte peek_maze(byte tx, byte ty) {
-  return peek_tile(tx, ty);
+  if (tx >= 28 || ty < MAZE_Y0 || ty >= (byte)(MAZE_Y0 + MAZE_ROWS))
+    return peek_tile(tx, ty);
+  return maze_ram[(word)(ty - MAZE_Y0) * 28u + tx];
 }
 
 void poke_maze(byte tx, byte ty, byte tile, byte pal) {
+  if (tx < 28 && ty >= MAZE_Y0 && ty < (byte)(MAZE_Y0 + MAZE_ROWS))
+    maze_ram[(word)(ty - MAZE_Y0) * 28u + tx] = tile;
   poke_tile(tx, ty, tile, pal);
 }
 
 byte tile_blocked(byte tx, byte ty) {
   if (tx >= 28 || ty >= 36) return 1;
-  if (ty >= 2 && ty < 34)
-    return peek_maze(tx, ty) >= 0xC0;
-  return peek_tile(tx, ty) >= 0xC0;
+  if (ty >= MAZE_Y0 && ty < (byte)(MAZE_Y0 + MAZE_ROWS))
+    return (byte)(maze_ram[(word)(ty - MAZE_Y0) * 28u + tx] >= 0xC0);
+  return (byte)(peek_tile(tx, ty) >= 0xC0);
 }
 
 /* Table A.1 — fright seconds (×60 at use). 0 = no blue. */
@@ -138,12 +167,17 @@ word fright_duration(void) {
 }
 
 word fright_flash_ticks(void) {
+  static byte cached_lv = 0xff;
+  static word cached;
   byte lv = level;
   byte n;
   if (lv > 20) lv = 20;
+  if (lv == cached_lv) return cached;
+  cached_lv = lv;
   n = fright_flashes[lv];
   /* n*28 = (n<<5)-(n<<2) */
-  return (word)(((word)n << 5) - ((word)n << 2));
+  cached = (word)(((word)n << 5) - ((word)n << 2));
+  return cached;
 }
 
 void try_eat_tile(byte tx, byte ty) {

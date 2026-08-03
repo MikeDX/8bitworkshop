@@ -213,6 +213,7 @@ static void show_ready_banner(byte player_one) {
     actors_draw_anim(0);
   }
   put_string(11, 20, "      ", 0);
+  sfx_off(); /* cut jingle before ambient/siren */
 }
 
 /* "CREDIT  0" / "CREDIT 10" — arcade spacing (two spaces if <10, one if ≥10). */
@@ -395,6 +396,7 @@ static void attract_chase(void) {
   byte hunt = 0;
   byte was_power = 0;
   byte pill_pal = 0xFF;
+  byte chase_pill = 1;
   word chase_t = 0;
 
   attract_demo = 1;
@@ -439,7 +441,7 @@ static void attract_chase(void) {
       if (pp != pill_pal) {
         pill_pal = pp;
         poke_pal(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, pp);
-        if (peek_tile(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY) == T_POWER_A)
+        if (chase_pill)
           poke_pal(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, pp);
       }
     }
@@ -506,6 +508,7 @@ static void attract_chase(void) {
     /* Energizer just eaten → reverse Pac + ghosts (arcade fright reverse). */
     if (power_ticks && !was_power) {
       hunt = 1;
+      chase_pill = 0;
       pac_dir = pac_want = DIR_RIGHT;
       for (i = 0; i < GHOST_N; i++) {
         Ghost* g;
@@ -806,12 +809,12 @@ static byte attract_maze_demo(void) {
 
 #ifndef ATTRACT_MAZE_ONLY
 static void attract_draw_pts_legend(void) {
-  poke_tile(10, 24, T_DOT_A, PAL_DOT);
+  poke_maze(10, 24, T_DOT_A, PAL_DOT);
   put_string(12, 24, "10 ", 0x0F);
   poke_tile(15, 24, TILE_PTS0, 0x0F);
   poke_tile(16, 24, TILE_PTS1, 0x0F);
   poke_tile(17, 24, TILE_PTS2, 0x0F);
-  poke_tile(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, T_POWER_A, PAL_DOT);
+  poke_maze(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, T_POWER_A, PAL_DOT);
   put_string(12, 26, "50 ", 0x0F);
   poke_tile(15, 26, TILE_PTS0, 0x0F);
   poke_tile(16, 26, TILE_PTS1, 0x0F);
@@ -851,7 +854,7 @@ restart_attract:
         if (t < ATTRACT_PTS_T)
           attract_draw_pts_legend();
         attract_draw_copyright();
-        poke_tile(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, T_POWER_A, PAL_DOT);
+        poke_maze(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, T_POWER_A, PAL_DOT);
         poke_pal(ATTRACT_SCORE_PX, ATTRACT_SCORE_PY, 0x10);
         poke_pal(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, 0x10);
         t = ATTRACT_CHASE_T0;
@@ -882,7 +885,7 @@ restart_attract:
       /* copyright + chase energizer */
       if (t == ATTRACT_COPY_T) {
         attract_draw_copyright();
-        poke_tile(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, T_POWER_A, PAL_DOT);
+        poke_maze(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, T_POWER_A, PAL_DOT);
         poke_pal(ATTRACT_CHASE_PX, ATTRACT_CHASE_PY, 0x10);
       }
 
@@ -911,7 +914,6 @@ restart_attract:
 void show_death(void) {
   byte t, frame;
   byte i;
-  word timeout;
   for (i = 1; i < 8; i++) hide_sprite(i);
   if (!attract_demo)
     play_sfx(4);
@@ -922,21 +924,12 @@ void show_death(void) {
                   (byte)((pac_tx << 3) + pac_ox - 8),
                   (byte)((pac_ty << 3) + pac_oy - 8), 0);
     wait_vblank();
-      if (!attract_demo && t == 72) CH3_E_NUM = 0x20;
   }
   hide_sprite(0);
   if (attract_demo) return;
-  /* Wait for coda bits to clear — timeout if engine missed a frame. */
-  timeout = 180;
-  while ((CH3_E_NUM & 0x20) && timeout--) {
+  /* Hold while YM death cascade finishes (~1s). */
+  for (t = 0; t < 60; t++)
     wait_vblank();
-    }
-  wait_vblank();
-  CH3_E_NUM = 0x20;
-  timeout = 180;
-  while ((CH3_E_NUM & 0x20) && timeout--) {
-    wait_vblank();
-    }
   sfx_off();
 }
 

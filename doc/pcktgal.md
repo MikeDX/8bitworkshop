@@ -160,18 +160,21 @@ Not RAM-writable — palette is baked into ROM. Design mazes/sprites around fixe
 
 ## 7. Sound (hardware vs 8bitworkshop)
 
-| Hardware | 8bitworkshop today |
-|----------|--------------------|
-| YM2203 + YM3812 + MSM5205 ADPCM | **Stubbed** (latch only) |
-| Second 6502 + sound ROM | Silent stub ROM for MAME export (`--stub-audio`) |
+| Hardware | Pac-Man port |
+|----------|----------------|
+| YM2203 + YM3812 + MSM5205 ADPCM | **YM2203 SSG** (3 voices: lead/SFX, harmony/fright, siren/eyes). MSM/OPL idle |
+| Second 6502 + sound ROM | Homebrew firmware `presets/pcktgal/audio.s` → `eb03-2.f2` |
+| Main→audio latch `$1A00` | `play_sfx` / `update_ambient` write command bytes |
 
-A Pac-Man port would need either:
+Build: `scripts/build_pcktgal_audio.sh` (also run from `build_pcktgal_local.sh pacman`).  
+Commands: `presets/pcktgal/audio_cmds.inc` (waka, eat, death, coin, fright, siren, eyes, prelude, intermission).  
 
-1. A simplified YM/OPL + noise/ADPCM recreation on the audio CPU, or  
-2. Main-CPU-driven beeps (limited), or  
-3. Defer audio and validate gameplay/video first in MAME with `--stub-audio`.
+SSG voice map (so SFX and ambient can overlap, like Namco’s 3-voice WSG):
+- **A** — music lead / one-shot SFX (waka, eat, death, coin, fruit)
+- **B** — music harmony / fright warble
+- **C** — siren / eyes whoop
 
-Namco WSG wave tables from `pacmanonpacman` do **not** map 1:1.
+Timbre is square-wave SSG, not wavetable — but polyphony matches the arcade role split. Pure MSM5205 ADPCM was abandoned (single stream can’t overlap).
 
 ---
 

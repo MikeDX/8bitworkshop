@@ -46,7 +46,7 @@ void pacman_hw_init(void) {
   POKE(0x1800, 0x03); /* 8x8, no forced TILE_FLIPX */
   POKE(0x1810, 0); POKE(0x1811, 0);
   POKE(0x1812, 0); POKE(0x1813, 0);
-  for (i = 0; i < 64; i++)
+  for (i = 0; i < 8; i++)
     POKE(0x1000 + i * 4, 0xf8);
   _pac_p1 = 0xff;
   _pac_p2 = 0xff;
@@ -87,11 +87,13 @@ word vram_addr(byte x, byte y) {
 
 void poke_tile(byte x, byte y, byte tile, byte pal) {
   byte hx, hy;
-  word addr;
-  word w;
   if (!logic_tile_to_hw(x, y, &hx, &hy)) return;
-  addr = hw_vram_addr(hx, hy);
-  w = ((word)(pal & 0x0f) << 12) | tile;
+  poke_tile_hw(hx, hy, tile, pal);
+}
+
+void poke_tile_hw(byte hx, byte hy, byte tile, byte pal) {
+  word addr = hw_vram_addr(hx, hy);
+  word w = ((word)(pal & 0x0f) << 12) | tile;
   POKE(addr, w >> 8);
   POKE(addr + 1, w & 0xff);
 }
@@ -99,11 +101,10 @@ void poke_tile(byte x, byte y, byte tile, byte pal) {
 void poke_pal(byte x, byte y, byte pal) {
   byte hx, hy;
   word addr;
-  word old;
   if (!logic_tile_to_hw(x, y, &hx, &hy)) return;
   addr = hw_vram_addr(hx, hy);
-  old = ((word)PEEK(addr) << 8) | PEEK(addr + 1);
-  poke_tile(x, y, (byte)(old & 0xff), pal);
+  /* RMW colour nibble only — one transform, no second poke_tile. */
+  POKE(addr, (byte)((pal << 4) | (PEEK(addr) & 0x0f)));
 }
 
 byte peek_tile(byte x, byte y) {
@@ -115,15 +116,16 @@ byte peek_tile(byte x, byte y) {
 }
 
 void clrscr(byte pal) {
-  /* Clear full 32×32 map window (hy 28–29 hold shifted maze right edge). */
-  byte hx, hy;
-  word w = ((word)(pal & 0x0f) << 12) | 0x40;
-  for (hy = 0; hy < 32; hy++) {
-    for (hx = 0; hx < 32; hx++) {
-      word addr = hw_vram_addr(hx, hy);
-      POKE(addr, w >> 8);
-      POKE(addr + 1, w & 0xff);
-    }
+  /* Linear fill of 32×32 map (no per-tile address multiply). */
+  word addr = 0x0800;
+  byte hi = (byte)((pal & 0x0f) << 4);
+  byte lo = 0x40;
+  word n = 1024;
+  while (n--) {
+    POKE(addr, hi);
+    addr++;
+    POKE(addr, lo);
+    addr++;
   }
 }
 
@@ -159,48 +161,41 @@ void put_string(byte x, byte y, const char* s, byte pal) {
 }
 
 static byte spr_color_bank(byte pal) {
-  if (pal == 9) return 0;
-  if (pal == 0x11) return 6;
-  if (pal == 0x12) return 4;
-  if (pal == 0x14) return 2;
-  if (pal == 0x18) return 0;
-  if (pal == 0x19) return 4;
-  return (byte)(pal & 7);
+  /* pal→DECO bank; covers yellow/scared/fruit/eyes + ghost colours 0–7. */
+  static const byte lut[32] = {
+    0,1,2,3,4,5,6,7,
+    0,0,2,3,4,5,6,7,   /* 9 → 0 (Pac yellow) */
+    0,6,4,3,2,5,6,7,   /* 0x11→6, 0x12→4, 0x14→2 */
+    0,4,2,3,4,5,6,7    /* 0x18→0, 0x19→4 */
+  };
+  return lut[pal & 31];
 }
 
 void set_sprite_ex(byte i, byte shape, byte color, byte sx, byte sy, byte flags) {
   unsigned int a;
   byte flip;
   byte bank;
-  byte hx, hy;
   if (i >= 64) return;
 
   /*
    * Logical sprite top-left (sx,sy) in portrait pixels.
-   * 90° CW + shifts: (sx,sy) → (240-sy+16, sx+16) for 16×16.
+   * Folded 90° CW + shifts: DECO Y = 224-sx, DECO X = sy-16.
    * sy < 16 is above the viewport (logical y 2..33).
    */
   if (sy < (byte)(LOGIC_Y_SHIFT * 8)) {
     hide_sprite(i);
     return;
   }
-  hx = (byte)(240 - sy + (LOGIC_Y_SHIFT * 8));
-  hy = (byte)(sx + (LOGIC_X_SHIFT * 8));
 
   a = 0x1000 + (unsigned int)i * 4u;
   bank = spr_color_bank(color);
-  /*
-   * Pac flags: bit0=flipY, bit1=flipX.
-   * After 90° CW of the sprite art, logical flipX ↔ hardware flipY, etc.
-   * DECO: bit1=flipy, bit2=flipx.
-   */
   flip = 0;
   if (flags & 2) flip |= 0x02; /* logical flipX → hw flipy */
   if (flags & 1) flip |= 0x04; /* logical flipY → hw flipx */
 
-  POKE(a + 0, (byte)(240 - hy));
+  POKE(a + 0, (byte)(224 - sx));
   POKE(a + 1, (byte)((bank << 4) | flip | ((shape >> 8) & 1)));
-  POKE(a + 2, (byte)(240 - hx));
+  POKE(a + 2, (byte)(sy - (LOGIC_Y_SHIFT * 8)));
   POKE(a + 3, (byte)(shape & 0xff));
 }
 
@@ -214,8 +209,9 @@ void hide_sprite(byte i) {
 }
 
 void hide_all_sprites(void) {
+  /* Only slots the game uses (Pac + ghosts + fruit ≤ index 7). */
   byte i;
-  for (i = 0; i < 64; i++) hide_sprite(i);
+  for (i = 0; i < 8; i++) hide_sprite(i);
 }
 
 void sound_voice(byte voice, word freq, byte vol, byte wave) {

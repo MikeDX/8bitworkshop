@@ -500,7 +500,6 @@ byte update_ghost_dir(byte i) {
   byte di, d, best, gdir, lx, ly, mode;
 
   mode = g->mode;
-  ghost_target(i); /* always refresh ghost_ai_tx/ty (debug overlay) */
 
   if (mode == MODE_HOUSE) {
     /* bounce between y=17*8 and 18*8 */
@@ -547,6 +546,8 @@ byte update_ghost_dir(byte i) {
     return 1;
   }
 
+  /* Pathfinding modes only — skip ghost_target in house/leave/enter. */
+  ghost_target(i);
   if (!AT_TILE_MID(g->ox, g->oy)) return 0;
 
   gdir = g->next_dir;
